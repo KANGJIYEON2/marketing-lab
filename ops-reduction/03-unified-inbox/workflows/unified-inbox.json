@@ -1,0 +1,334 @@
+{
+  "name": "03 Unified Inbox",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Every 5 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-1",
+              "name": "brand_voice",
+              "value": "친근하지만 전문적, 1인칭 단수. 사과/감사는 진심으로, 영업톤 자제.",
+              "type": "string"
+            },
+            {
+              "id": "cfg-2",
+              "name": "look_back_minutes",
+              "value": "=15",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.META_IG_USER_ID }}/media",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "fields", "value": "id,timestamp" },
+            { "name": "limit", "value": "10" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-ig-media",
+      "name": "IG: Recent Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract media IDs to fetch comments for\nconst raw = $input.first().json;\nconst items = (raw.data || []).map(m => ({ json: { media_id: m.id, media_ts: m.timestamp } }));\nreturn items;"
+      },
+      "id": "ig-media-ids",
+      "name": "Extract Media IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.media_id }}/comments",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "fields", "value": "id,text,username,timestamp,from" },
+            { "name": "limit", "value": "25" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-ig-comments",
+      "name": "IG: Comments per Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten comments + filter to lookback window\nconst lookbackMin = $('Config').first().json.look_back_minutes;\nconst cutoff = Date.now() - lookbackMin * 60 * 1000;\n\nconst all = [];\nfor (const item of $input.all()) {\n  const mediaId = item.json.id ? null : null; // mediaId comes from parent loop, see below\n  const comments = item.json.data || [];\n  for (const c of comments) {\n    const ts = c.timestamp ? new Date(c.timestamp).getTime() : Date.now();\n    if (ts < cutoff) continue;\n    all.push({\n      json: {\n        channel: 'instagram_comment',\n        external_id: c.id,\n        author: c.username || c.from?.username || 'unknown',\n        content: c.text || '',\n        source_url: '',\n        received_at: c.timestamp || new Date().toISOString(),\n      }\n    });\n  }\n}\nreturn all;"
+      },
+      "id": "flatten-ig",
+      "name": "Flatten IG Comments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 25,
+        "filters": {
+          "labelIds": ["INBOX"],
+          "q": "=is:unread newer_than:1h"
+        },
+        "format": "resolved"
+      },
+      "id": "fetch-gmail",
+      "name": "Gmail: Unread",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [680, 600],
+      "notes": "Gmail OAuth credential 필요. .env의 GMAIL_LABEL 활용하려면 q를 `label:{{ $env.GMAIL_LABEL }} is:unread`로 변경."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Gmail messages to common schema\nreturn $input.all().map(item => {\n  const m = item.json;\n  return {\n    json: {\n      channel: 'gmail',\n      external_id: m.id,\n      author: m.from || m.From || 'unknown',\n      content: (m.snippet || m.text || m.textPlain || '').slice(0, 2000),\n      source_url: `https://mail.google.com/mail/u/0/#inbox/${m.id}`,\n      received_at: m.internalDate ? new Date(parseInt(m.internalDate)).toISOString() : new Date().toISOString(),\n    }\n  };\n});"
+      },
+      "id": "normalize-gmail",
+      "name": "Normalize Gmail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 600]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-sources",
+      "name": "Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_INBOX }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "external_id|rich_text",
+              "condition": "equals",
+              "richTextValue": "={{ $json.external_id }}"
+            }
+          ]
+        }
+      },
+      "id": "check-exists",
+      "name": "Already In Notion?",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1780, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "not-exists",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "empty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-new",
+      "name": "If New",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You classify and draft replies for incoming customer messages across channels.\n\nBrand voice: {{ $('Config').first().json.brand_voice }}\n\nReturn STRICT JSON:\n{\n  \"intent\": \"question | complaint | praise | spam | sales_lead | other\",\n  \"urgency\": \"high | medium | low\",\n  \"sentiment\": \"positive | neutral | negative\",\n  \"confidence\": 0.0-1.0,\n  \"draft_reply\": \"<reply in the same language as the message; match channel tone>\"\n}\n\nChannel tone notes:\n- instagram_comment / instagram_dm: short, casual, 1-3 sentences max, emoji ok (max 1)\n- gmail: more formal, full sentences, signature line ok\n- youtube_comment / blog_comment: medium length, helpful tone\n\nIf intent is spam, set draft_reply to \"\" (empty).\nIf confidence < 0.6, escalate by appending \"⚠️ 사람 확인 필요\" at the end of draft_reply.\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Channel: {{ $('Merge Sources').item.json.channel }}\nAuthor: {{ $('Merge Sources').item.json.author }}\nReceived: {{ $('Merge Sources').item.json.received_at }}\n\nContent:\n{{ $('Merge Sources').item.json.content }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 800,
+          "temperature": 0.4
+        }
+      },
+      "id": "claude-classify",
+      "name": "Claude: Classify + Draft",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2220, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse LLM output and merge with original message\nconst raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet parsed;\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  parsed = { intent: 'other', urgency: 'medium', sentiment: 'neutral', confidence: 0, draft_reply: '' };\n}\n\nconst original = $('Merge Sources').item.json;\nreturn [{ json: { ...original, ...parsed } }];"
+      },
+      "id": "parse-claude",
+      "name": "Parse LLM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_INBOX }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.channel }}: {{ $json.author }} — {{ $json.content.slice(0, 40) }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "channel|select", "selectValue": "={{ $json.channel }}" },
+            { "key": "author|rich_text", "textContent": "={{ $json.author }}" },
+            { "key": "content|rich_text", "textContent": "={{ $json.content.slice(0, 1900) }}" },
+            { "key": "source_url|url", "urlValue": "={{ $json.source_url }}" },
+            { "key": "external_id|rich_text", "textContent": "={{ $json.external_id }}" },
+            { "key": "received_at|date", "date": "={{ $json.received_at }}" },
+            { "key": "intent|select", "selectValue": "={{ $json.intent }}" },
+            { "key": "urgency|select", "selectValue": "={{ $json.urgency }}" },
+            { "key": "sentiment|select", "selectValue": "={{ $json.sentiment }}" },
+            { "key": "draft_reply|rich_text", "textContent": "={{ $json.draft_reply }}" },
+            { "key": "confidence|number", "numberValue": "={{ $json.confidence }}" },
+            { "key": "status|select", "selectValue": "new" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "richText": true, "textContent": "Original" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.content }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Draft Reply" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.draft_reply }}" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Inbox Append",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2660, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build Slack message for the new item\nconst i = $json;\nconst urgencyEmoji = { high: '🔴', medium: '🟡', low: '⚪' }[i.urgency] || '⚪';\nconst sentimentEmoji = { positive: '😊', neutral: '😐', negative: '😠' }[i.sentiment] || '';\nconst confidenceWarn = i.confidence < 0.6 ? ' ⚠️' : '';\n\nconst text = `${urgencyEmoji} *${i.channel}* · ${i.intent} ${sentimentEmoji}${confidenceWarn}\\n` +\n  `*From*: ${i.author}\\n` +\n  `*Message*:\\n> ${i.content.split('\\n').join('\\n> ').slice(0, 500)}\\n\\n` +\n  `*Draft Reply*:\\n\\`\\`\\`\\n${i.draft_reply || '(no draft — spam or low confidence)'}\\n\\`\\`\\`\\n` +\n  (i.source_url ? `<${i.source_url}|원본 보기>` : '');\n\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 320]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_INBOX }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: #inbox",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3100, 320]
+    }
+  ],
+  "connections": {
+    "Every 5 min": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": {
+      "main": [[
+        { "node": "IG: Recent Media", "type": "main", "index": 0 },
+        { "node": "Gmail: Unread", "type": "main", "index": 0 }
+      ]]
+    },
+    "IG: Recent Media": { "main": [[{ "node": "Extract Media IDs", "type": "main", "index": 0 }]] },
+    "Extract Media IDs": { "main": [[{ "node": "IG: Comments per Media", "type": "main", "index": 0 }]] },
+    "IG: Comments per Media": { "main": [[{ "node": "Flatten IG Comments", "type": "main", "index": 0 }]] },
+    "Gmail: Unread": { "main": [[{ "node": "Normalize Gmail", "type": "main", "index": 0 }]] },
+    "Flatten IG Comments": { "main": [[{ "node": "Merge Sources", "type": "main", "index": 0 }]] },
+    "Normalize Gmail": { "main": [[{ "node": "Merge Sources", "type": "main", "index": 1 }]] },
+    "Merge Sources": { "main": [[{ "node": "Already In Notion?", "type": "main", "index": 0 }]] },
+    "Already In Notion?": { "main": [[{ "node": "If New", "type": "main", "index": 0 }]] },
+    "If New": { "main": [[{ "node": "Claude: Classify + Draft", "type": "main", "index": 0 }], []] },
+    "Claude: Classify + Draft": { "main": [[{ "node": "Parse LLM", "type": "main", "index": 0 }]] },
+    "Parse LLM": { "main": [[{ "node": "Notion: Inbox Append", "type": "main", "index": 0 }]] },
+    "Notion: Inbox Append": { "main": [[{ "node": "Build Slack Message", "type": "main", "index": 0 }]] },
+    "Build Slack Message": { "main": [[{ "node": "Slack: #inbox", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "ops-reduction" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}

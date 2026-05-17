@@ -8,6 +8,7 @@
 | [`ContentDrafts`](./content-drafts.md) | 02, 05, 06, 08 | `NOTION_DB_CONTENT_DRAFTS` |
 | [`Leads`](./leads.md) | 07, 09 | `NOTION_DB_LEADS` |
 | [`CampaignMetrics`](./campaign-metrics.md) | 06, 07, 09, 10 | `NOTION_DB_CAMPAIGN_METRICS` |
+| [`Inbox`](./inbox.md) | 03, 09 | `NOTION_DB_INBOX` |
 
 ## 공통 규칙
 
