@@ -1,0 +1,204 @@
+{
+  "name": "10 LP A/B — Generate Variants",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lp-experiment-start",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Experiment Start Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 400],
+      "notes": "POST body 예시:\n{\n  \"experiment_id\": \"exp_2026-05-17_hero-headline\",\n  \"lp_url\": \"https://yourdomain.com/pricing\",\n  \"control_headline\": \"현재 헤드라인\",\n  \"control_subhead\": \"현재 서브헤드 (선택)\",\n  \"target_persona\": \"1인 창업자\",\n  \"variants_count\": 2,\n  \"hypothesis\": \"구체적 시간 약속이 추상적 가치보다 전환 높을 것\"\n}"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize input\nconst body = $json.body || $json;\nconst input = {\n  experiment_id: body.experiment_id || `exp_${new Date().toISOString().slice(0,10)}_${Math.random().toString(36).slice(2,7)}`,\n  lp_url: body.lp_url || '',\n  control_headline: body.control_headline || '',\n  control_subhead: body.control_subhead || '',\n  target_persona: body.target_persona || 'general',\n  variants_count: parseInt(body.variants_count || 2),\n  hypothesis: body.hypothesis || '',\n  created_at: new Date().toISOString(),\n};\n\nif (!input.lp_url || !input.control_headline) {\n  throw new Error('lp_url and control_headline are required');\n}\nreturn [{ json: input }];"
+      },
+      "id": "normalize",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.lp_url }}",
+        "options": {
+          "response": { "response": { "responseFormat": "text" } },
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-lp",
+      "name": "Fetch LP HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract visible text (for product context)\nconst raw = $input.first().json.data || $input.first().json;\nconst html = typeof raw === 'string' ? raw : String(raw);\nconst text = html\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 4000);\nconst input = $('Validate Input').first().json;\nreturn [{ json: { ...input, lp_text: text } }];"
+      },
+      "id": "extract-text",
+      "name": "Extract LP Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You generate landing page headline variants for an A/B test.\n\nRequirements per variant:\n- Each variant uses a DIFFERENT hook angle (specific number / outcome / emotion / pain / contrast)\n- Length: <= 60 chars\n- Subhead suggestion (optional, <= 100 chars)\n- Don't just rephrase — change the underlying value proposition framing\n- Match the language of the control headline\n- Keep it tonally consistent with the LP body content (provided as lp_text)\n\nReturn STRICT JSON:\n{\n  \"variants\": [\n    {\n      \"variant_id\": \"A\" | \"B\" | \"C\" | \"D\",\n      \"headline\": \"<60 chars>\",\n      \"subhead\": \"<optional, 100 chars>\",\n      \"hook_angle\": \"<which angle this variant uses>\",\n      \"why\": \"<one sentence — why this might beat control for this persona>\"\n    }\n  ]\n}\n\nGenerate {{ $json.variants_count }} variants labeled A, B, C... (do not include control).\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Target persona: {{ $json.target_persona }}\nHypothesis: {{ $json.hypothesis }}\n\nControl headline (current):\n\"{{ $json.control_headline }}\"\n\nControl subhead (if any):\n\"{{ $json.control_subhead }}\"\n\nLP body context (truncated):\n---\n{{ $json.lp_text }}\n---"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1500,
+          "temperature": 0.7
+        }
+      },
+      "id": "claude-variants",
+      "name": "Claude: Generate Headlines",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet parsed;\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  return [];\n}\nconst ctx = $('Extract LP Text').item.json;\nconst variants = parsed.variants || [];\n\n// Build rows for CampaignMetrics: 1 row per variant (control + treatments)\nconst now = new Date().toISOString().slice(0, 10);\nconst rows = [];\n\n// Control\nrows.push({\n  json: {\n    name: `${ctx.experiment_id} — Control`,\n    variant_id: 'control',\n    experiment_id: ctx.experiment_id,\n    headline: ctx.control_headline,\n    subhead: ctx.control_subhead,\n    hook_angle: 'control',\n    why: 'Current production',\n    lp_url: ctx.lp_url,\n    date: now,\n  }\n});\n\nfor (const v of variants) {\n  rows.push({\n    json: {\n      name: `${ctx.experiment_id} — Variant ${v.variant_id}`,\n      variant_id: v.variant_id,\n      experiment_id: ctx.experiment_id,\n      headline: v.headline,\n      subhead: v.subhead || '',\n      hook_angle: v.hook_angle,\n      why: v.why,\n      lp_url: ctx.lp_url,\n      date: now,\n    }\n  });\n}\nreturn rows;"
+      },
+      "id": "build-rows",
+      "name": "Build Variant Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CAMPAIGN_METRICS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.name }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "channel|select", "selectValue": "lp_experiment" },
+            { "key": "entity_type|select", "selectValue": "lp_variant" },
+            { "key": "entity_id|rich_text", "textContent": "={{ $json.variant_id }}" },
+            { "key": "experiment_id|rich_text", "textContent": "={{ $json.experiment_id }}" },
+            { "key": "date|date", "date": "={{ $json.date }}" },
+            { "key": "period|select", "selectValue": "daily" },
+            { "key": "notes|rich_text", "textContent": "=Headline: {{ $json.headline }}\\nSubhead: {{ $json.subhead }}\\nHook: {{ $json.hook_angle }}\\nWhy: {{ $json.why }}\\nLP: {{ $json.lp_url }}" },
+            { "key": "winner|checkbox", "checkboxValue": false }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "richText": true, "textContent": "Headline" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.headline }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Subhead" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.subhead || '(none)' }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Hypothesis" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.why }}" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Variant Row",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "collect",
+      "name": "Collect All",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1780, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst ctx = $('Extract LP Text').first().json;\n\nlet text = `🧪 *새 LP A/B 실험 준비*\\n` +\n  `*ID*: \\`${ctx.experiment_id}\\`\\n` +\n  `*LP*: <${ctx.lp_url}|${ctx.lp_url}>\\n` +\n  `*Persona*: ${ctx.target_persona}\\n` +\n  `*Hypothesis*: ${ctx.hypothesis || '(none)'}\\n\\n` +\n  `*Variants*:\\n`;\nrows.forEach(r => {\n  const isControl = r.variant_id === 'control';\n  text += `${isControl ? '🔵' : '🟢'} *${isControl ? 'Control' : r.variant_id}* — \\\"${r.headline}\\\"\\n`;\n  if (r.subhead) text += `   _${r.subhead}_\\n`;\n  if (!isControl) text += `   각도: ${r.hook_angle}\\n`;\n});\ntext += `\\nNotion CampaignMetrics에서 experiment_id 필터로 조회 가능. 검토 후 LP에 배포.`;\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: Variants Ready",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2220, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true, \"experiment_id\": \"{{ $('Extract LP Text').first().json.experiment_id }}\" }",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2220, 580]
+    }
+  ],
+  "connections": {
+    "Experiment Start Webhook": { "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]] },
+    "Validate Input": { "main": [[{ "node": "Fetch LP HTML", "type": "main", "index": 0 }]] },
+    "Fetch LP HTML": { "main": [[{ "node": "Extract LP Text", "type": "main", "index": 0 }]] },
+    "Extract LP Text": { "main": [[{ "node": "Claude: Generate Headlines", "type": "main", "index": 0 }]] },
+    "Claude: Generate Headlines": { "main": [[{ "node": "Build Variant Rows", "type": "main", "index": 0 }]] },
+    "Build Variant Rows": { "main": [[{ "node": "Notion: Variant Row", "type": "main", "index": 0 }]] },
+    "Notion: Variant Row": { "main": [[{ "node": "Collect All", "type": "main", "index": 0 }]] },
+    "Collect All": {
+      "main": [[
+        { "node": "Build Slack", "type": "main", "index": 0 },
+        { "node": "Respond", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build Slack": { "main": [[{ "node": "Slack: Variants Ready", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true, "saveManualExecutions": true },
+  "tags": [{ "name": "marketing-lab" }, { "name": "revenue-impact" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}

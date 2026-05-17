@@ -1,0 +1,159 @@
+{
+  "name": "10 LP A/B — Check Results",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 7 * * *" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Daily 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "c-1", "name": "ga4_property_id", "value": "={{ $env.GA4_PROPERTY_ID }}", "type": "string" },
+            { "id": "c-2", "name": "min_sample_per_variant", "value": "=500", "type": "number" },
+            { "id": "c-3", "name": "significance_threshold", "value": "=0.05", "type": "number" },
+            { "id": "c-4", "name": "experiment_dimension", "value": "customEvent:experiment_id", "type": "string" },
+            { "id": "c-5", "name": "variant_dimension", "value": "customEvent:variant_id", "type": "string" }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CAMPAIGN_METRICS }}",
+          "mode": "id"
+        },
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            { "key": "entity_type|select", "condition": "equals", "selectValue": "lp_variant" },
+            { "key": "winner|checkbox", "condition": "equals", "checkboxValue": false }
+          ]
+        }
+      },
+      "id": "active-experiments",
+      "name": "Fetch Active Experiments",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [660, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Group variants by experiment_id\nconst rows = $input.all();\nconst byExp = new Map();\nfor (const row of rows) {\n  const props = row.json.properties || {};\n  const expId = props.experiment_id?.rich_text?.[0]?.plain_text;\n  const variantId = props.entity_id?.rich_text?.[0]?.plain_text;\n  if (!expId) continue;\n  if (!byExp.has(expId)) byExp.set(expId, []);\n  byExp.get(expId).push({ row_id: row.json.id, variant_id: variantId });\n}\nreturn [...byExp.entries()].map(([expId, variants]) => ({\n  json: { experiment_id: expId, variants }\n}));"
+      },
+      "id": "group-experiments",
+      "name": "Group by Experiment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://analyticsdata.googleapis.com/v1beta/properties/{{ $('Config').first().json.ga4_property_id }}:runReport",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"dateRanges\": [{\"startDate\": \"30daysAgo\", \"endDate\": \"yesterday\"}],\n  \"dimensions\": [\n    {\"name\": \"customEvent:experiment_id\"},\n    {\"name\": \"customEvent:variant_id\"}\n  ],\n  \"metrics\": [\n    {\"name\": \"eventCount\"},\n    {\"name\": \"sessions\"},\n    {\"name\": \"conversions\"}\n  ],\n  \"dimensionFilter\": {\n    \"filter\": {\n      \"fieldName\": \"customEvent:experiment_id\",\n      \"stringFilter\": {\"value\": \"{{ $json.experiment_id }}\"}\n    }\n  }\n}",
+        "options": {}
+      },
+      "id": "ga4-query",
+      "name": "GA4: Variant Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse GA4 response, compute conversion rates per variant, run z-test for each treatment vs control\nconst ga4 = $json;\nconst expCtx = $('Group by Experiment').item.json;\nconst cfg = $('Config').first().json;\nconst minSample = cfg.min_sample_per_variant;\nconst alpha = cfg.significance_threshold;\n\nconst rows = ga4.rows || [];\nconst byVariant = new Map();\nfor (const r of rows) {\n  const variantId = r.dimensionValues?.[1]?.value;\n  if (!variantId) continue;\n  const metrics = r.metricValues || [];\n  byVariant.set(variantId, {\n    events: parseInt(metrics[0]?.value || 0),\n    sessions: parseInt(metrics[1]?.value || 0),\n    conversions: parseInt(metrics[2]?.value || 0),\n  });\n}\n\nconst control = byVariant.get('control');\nif (!control) {\n  return [{ json: { experiment_id: expCtx.experiment_id, status: 'no_control_data', variants: [] } }];\n}\n\n// z-test helper\nfunction zTest(c1, n1, c2, n2) {\n  if (n1 < minSample || n2 < minSample) return { significant: false, p: null, lift: null };\n  const p1 = c1 / n1, p2 = c2 / n2;\n  const pPool = (c1 + c2) / (n1 + n2);\n  const se = Math.sqrt(pPool * (1 - pPool) * (1/n1 + 1/n2));\n  if (se === 0) return { significant: false, p: null, lift: null };\n  const z = (p2 - p1) / se;\n  // two-tailed p-value approximation\n  const p = 2 * (1 - normalCdf(Math.abs(z)));\n  const lift = (p2 - p1) / p1;\n  return { significant: p < alpha, p, lift, z, p1, p2 };\n}\n\nfunction normalCdf(z) {\n  // Approximation of standard normal CDF\n  const t = 1 / (1 + 0.2316419 * z);\n  const d = 0.3989423 * Math.exp(-z * z / 2);\n  return 1 - d * (0.3193815*t - 0.3565638*t*t + 1.781478*Math.pow(t,3) - 1.821256*Math.pow(t,4) + 1.330274*Math.pow(t,5));\n}\n\nconst results = [];\nfor (const [vid, data] of byVariant.entries()) {\n  if (vid === 'control') continue;\n  const test = zTest(control.conversions, control.sessions, data.conversions, data.sessions);\n  results.push({\n    variant_id: vid,\n    control_cvr: control.sessions > 0 ? (control.conversions / control.sessions) : 0,\n    variant_cvr: data.sessions > 0 ? (data.conversions / data.sessions) : 0,\n    control_sessions: control.sessions,\n    variant_sessions: data.sessions,\n    ...test,\n  });\n}\n\nconst significantWinners = results.filter(r => r.significant && r.lift > 0);\n\nreturn [{\n  json: {\n    experiment_id: expCtx.experiment_id,\n    control,\n    results,\n    has_winner: significantWinners.length > 0,\n    winner: significantWinners.sort((a, b) => b.lift - a.lift)[0] || null,\n  }\n}];"
+      },
+      "id": "compute-stats",
+      "name": "Compute Significance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "has-winner",
+              "leftValue": "={{ $json.has_winner }}",
+              "rightValue": "true",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-winner",
+      "name": "Has Winner?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1540, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $json;\nconst w = r.winner;\nconst liftPct = (w.lift * 100).toFixed(1);\nconst sigP = w.p?.toFixed(4) || 'n/a';\n\nlet text = `🏆 *A/B 위너 결정*\\n` +\n  `*Experiment*: \\`${r.experiment_id}\\`\\n\\n` +\n  `*Variant ${w.variant_id}* 우승 (lift +${liftPct}%, p=${sigP})\\n\\n` +\n  `| | Sessions | Conversions | CVR |\\n` +\n  `|---|---|---|---|\\n` +\n  `| Control | ${w.control_sessions} | ${Math.round(w.p1 * w.control_sessions)} | ${(w.p1 * 100).toFixed(2)}% |\\n` +\n  `| ${w.variant_id} | ${w.variant_sessions} | ${Math.round(w.p2 * w.variant_sessions)} | ${(w.p2 * 100).toFixed(2)}% |\\n\\n` +\n  `*다음 액션*: Notion에서 winner=true로 표시, LP에 위너 헤드라인으로 교체 (수동).`;\nreturn [{ json: { text, experiment_id: r.experiment_id, winner_variant: w.variant_id } }];"
+      },
+      "id": "build-winner",
+      "name": "Build Winner Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 320]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-winner",
+      "name": "Slack: Winner Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1980, 320]
+    }
+  ],
+  "connections": {
+    "Daily 07:00": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Fetch Active Experiments", "type": "main", "index": 0 }]] },
+    "Fetch Active Experiments": { "main": [[{ "node": "Group by Experiment", "type": "main", "index": 0 }]] },
+    "Group by Experiment": { "main": [[{ "node": "GA4: Variant Stats", "type": "main", "index": 0 }]] },
+    "GA4: Variant Stats": { "main": [[{ "node": "Compute Significance", "type": "main", "index": 0 }]] },
+    "Compute Significance": { "main": [[{ "node": "Has Winner?", "type": "main", "index": 0 }]] },
+    "Has Winner?": { "main": [[{ "node": "Build Winner Message", "type": "main", "index": 0 }], []] },
+    "Build Winner Message": { "main": [[{ "node": "Slack: Winner Alert", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true, "saveManualExecutions": true },
+  "tags": [{ "name": "marketing-lab" }, { "name": "revenue-impact" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}
