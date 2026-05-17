@@ -12,30 +12,62 @@ In-house 마케팅 자동화 10종을 단계적으로 구축하는 모노레포.
 
 ## 2. 폴더 구조
 
+모노레포. 각 자동화는 동일한 서브폴더 구조를 가진다.
+
 ```
 marketing-lab/
 ├── CLAUDE.md                 # 이 파일 (전체 컨텍스트)
-├── docs/
-│   └── roadmap.md            # 12주 단계별 실행 계획
-├── content-machine/          # 콘텐츠 생산·확산 (글감→배포까지)
-│   ├── 01-idea-engine/       # 콘텐츠 아이디어 엔진
-│   ├── 02-youtube-factory/   # 유튜브 1편 → 멀티채널 변환
-│   ├── 05-seo-hunter/        # SEO 11~20위 기회 헌터
-│   └── 08-ugc-collector/     # UGC·리뷰 수집 → 콘텐츠화
-├── revenue-impact/           # 직접 매출에 영향 (전환·광고·LP)
-│   ├── 06-ad-evolution/      # 광고 카피 진화 엔진
-│   ├── 07-lead-sequence/     # 리드 캡처 → 개인화 시퀀스
-│   └── 10-lp-ab-test/        # 랜딩페이지 A/B 자동 실험
-└── ops-reduction/            # 운영 부담 감소 (반복 업무 제거)
-    ├── 03-unified-inbox/     # 댓글·DM·문의 통합 인박스
-    ├── 04-competitor-intel/  # 경쟁사 인텔리전스 봇
-    └── 09-weekly-report/     # 주간 리포트 + 다음주 액션
+├── README.md                 # 자동화 인덱스
+├── .env.example              # 환경변수 템플릿 (전 자동화 공유)
+├── .gitignore
+├── docs/                     # 레포 전역 문서
+│   ├── README.md
+│   ├── roadmap.md            # 12주 실행 로드맵
+│   ├── layer-0/              # Week 1 인프라 (모든 자동화의 전제)
+│   │   ├── README.md
+│   │   ├── SETUP.md          # 9단계 셋업 가이드
+│   │   └── workflows/
+│   │       └── hello-world.json
+│   └── notion-schemas/       # DB 4종 스키마 (자동화들이 공유)
+│       ├── README.md
+│       ├── content-ideas.md
+│       ├── content-drafts.md
+│       ├── leads.md
+│       └── campaign-metrics.md
+├── content-machine/          # 콘텐츠 생산·확산
+│   ├── README.md
+│   ├── 01-idea-engine/
+│   ├── 02-youtube-factory/
+│   ├── 05-seo-hunter/
+│   └── 08-ugc-collector/
+├── revenue-impact/           # 매출 직결
+│   ├── README.md
+│   ├── 06-ad-evolution/
+│   ├── 07-lead-sequence/
+│   └── 10-lp-ab-test/
+└── ops-reduction/            # 운영 부담 감소
+    ├── README.md
+    ├── 03-unified-inbox/
+    ├── 04-competitor-intel/
+    └── 09-weekly-report/
 ```
 
-각 자동화 폴더에는 최소 다음이 포함된다:
-- `PRD.md` — 페인포인트·KPI·n8n 워크플로 설계·MVP 범위
-- `workflows/` — n8n export JSON (구현 시 추가)
-- `prompts/` — LLM 프롬프트 모음 (구현 시 추가)
+### 자동화 폴더 표준 구조
+
+각 `XX-name/` 자동화 폴더는 다음을 가진다:
+
+```
+XX-name/
+├── README.md       # 자동화 진입점 (한 줄 설명·상태·진입점 링크)
+├── PRD.md          # 제품 요구사항
+├── SETUP.md        # 셋업 가이드 (구현 단계에서 작성)
+├── prompts/        # LLM 시스템 프롬프트 (.md)
+├── workflows/      # n8n export JSON
+├── scripts/        # 보조 스크립트 (필요 시)
+└── docs/           # 자동화 전용 추가 문서
+```
+
+서브폴더 자체에도 README.md가 있어 역할과 파일 작명 규칙을 안내한다.
 
 ---
 
@@ -100,9 +132,9 @@ marketing-lab/
 
 ## 7. 작업 순서 권장
 
-`docs/roadmap.md`에 12주 단계별 일정 정리. 핵심 순서:
+[`docs/roadmap.md`](./docs/roadmap.md)에 12주 단계별 일정 정리. 핵심 순서:
 
-1. **Layer 0 (1주)**: 공통 인프라 (Notion DB, n8n credentials, Slack)
+1. **Layer 0 (1주)**: 공통 인프라 — [`docs/layer-0/SETUP.md`](./docs/layer-0/SETUP.md) 따라 진행
 2. **콘텐츠 머신** 먼저: 01 → 02 → 05 → 08 (글감과 콘텐츠 자산이 다른 레이어의 input)
 3. **매출 영향**: 06 → 07 → 10
 4. **운영 부담**: 03 → 04 → 09 (병렬 진행 가능)
@@ -117,7 +149,9 @@ marketing-lab/
 ## 8. 작업할 때 Claude에게
 
 - **이 파일을 먼저 읽고** 어떤 자동화 범위인지 파악할 것
-- 새 자동화 추가 시 폴더 구조와 `PRD.md` 템플릿 따를 것
+- 새 자동화 추가 시 **자동화 폴더 표준 구조**(섹션 2) 그대로 따를 것
+- 각 자동화 폴더에 `README.md`(진입점) + `PRD.md`(요구사항) 최소 2개
 - **n8n 워크플로는 JSON export로** `workflows/` 폴더에 저장
 - 모든 LLM 프롬프트는 `prompts/*.md`로 분리 (인라인 금지)
+- **Notion DB 스키마 변경 시** [`docs/notion-schemas/`](./docs/notion-schemas/)와 영향받는 자동화 PRD 모두 업데이트
 - **개발 원칙 5가지**(섹션 5) 항상 준수

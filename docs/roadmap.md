@@ -17,16 +17,16 @@
 
 목표: **자동화 0개 만들고도 일주일을 끝낼 수 있어야 한다.**
 
-- [ ] n8n 셀프호스팅 셋업 (Docker/Railway/Hetzner)
-- [ ] Notion 워크스페이스 + DB 4종 생성
-  - `ContentIdeas`, `ContentDrafts`, `Leads`, `CampaignMetrics`
-- [ ] Slack 워크스페이스 + 채널 생성
-  - `#automation-log`, `#content-ideas`, `#inbox`, `#competitor-intel`, `#weekly-report`
-- [ ] n8n credentials 등록
-  - Claude API, OpenAI, Notion, Slack
-- [ ] `.env` 템플릿 + `.gitignore` 정리
+상세 가이드: [`layer-0/SETUP.md`](./layer-0/SETUP.md) (9단계 체크리스트)
 
-산출물: 빈 n8n에서 "hello world" 워크플로 1개가 Slack에 메시지 보낸다.
+- [ ] n8n 셀프호스팅 셋업 (Docker/Railway/Hetzner)
+- [ ] Notion 워크스페이스 + DB 4종 생성 ([스키마](./notion-schemas/))
+- [ ] Slack 워크스페이스 + 채널 5종 + 봇 토큰
+- [ ] n8n credentials 등록 (Notion / Slack / Anthropic)
+- [ ] `.env` 채움 + `.gitignore` 확인
+- [ ] [`layer-0/workflows/hello-world.json`](./layer-0/workflows/hello-world.json) 임포트·실행 성공
+
+산출물: hello-world 워크플로가 `#automation-log`에 메시지 보낸다.
 
 ---
 

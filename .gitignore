@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+service-account*.json
+credentials*.json
+
+# n8n local data (if mounted into repo accidentally)
+.n8n/
+n8n_data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Dependencies (in case any node script is added later)
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build / cache
+dist/
+build/
+.cache/

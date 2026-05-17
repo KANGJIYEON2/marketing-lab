@@ -1,0 +1,92 @@
+{
+  "name": "00 Hello World (Layer 0 verification)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Daily 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "수동 테스트 시 Execute Workflow 버튼 사용. 활성화 후엔 매일 09:00 실행."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Layer 0 verification payload\nconst now = new Date();\nconst tzKST = new Intl.DateTimeFormat('ko-KR', {\n  timeZone: 'Asia/Seoul',\n  dateStyle: 'medium',\n  timeStyle: 'short'\n}).format(now);\n\nreturn [{\n  json: {\n    message: `✅ Layer 0 OK — n8n is alive\\n• Time (KST): ${tzKST}\\n• Workflow: 00 Hello World\\n• Next: Layer 0 체크리스트 9번 항목 ✓ 처리`,\n    timestamp: now.toISOString()\n  }\n}];"
+      },
+      "id": "build-message",
+      "name": "Build Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.message }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: #automation-log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [680, 300],
+      "notes": "Slack credential 필요. 채널은 .env의 SLACK_CHANNEL_LOG 참조."
+    }
+  ],
+  "connections": {
+    "Daily 09:00": {
+      "main": [
+        [
+          {
+            "node": "Build Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Message": {
+      "main": [
+        [
+          {
+            "node": "Slack: #automation-log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [
+    {
+      "name": "marketing-lab"
+    },
+    {
+      "name": "layer-0"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
