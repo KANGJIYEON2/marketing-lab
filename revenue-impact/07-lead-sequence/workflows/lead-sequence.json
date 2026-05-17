@@ -1,0 +1,296 @@
+{
+  "name": "07 Lead Capture → Personalized Welcome",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-capture",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 400],
+      "notes": "Tally/Typeform/자체 LP에서 이 URL로 POST. 필드: email, name (필수), company, role (선택), utm_source, utm_campaign"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract + normalize lead data from various form providers\nconst body = $json.body || $json;\n\n// Tally sends fields in `data.fields[]` array; Typeform in `form_response.answers`\n// Generic POST sends top-level keys. Handle all 3.\nfunction extract(b) {\n  // Tally\n  if (b.data?.fields) {\n    const out = {};\n    for (const f of b.data.fields) {\n      out[f.label?.toLowerCase()] = f.value;\n    }\n    return out;\n  }\n  // Typeform\n  if (b.form_response?.answers) {\n    const out = {};\n    for (const a of b.form_response.answers) {\n      out[a.field?.title?.toLowerCase()] = a.text || a.email || a.choice?.label || a.number;\n    }\n    return out;\n  }\n  // Generic\n  return b;\n}\n\nconst raw = extract(body);\n\nconst lead = {\n  email: (raw.email || raw['이메일'] || '').toString().trim(),\n  name: (raw.name || raw['이름'] || raw['성함'] || '').toString().trim(),\n  company: (raw.company || raw['회사'] || '').toString().trim(),\n  role: (raw.role || raw['직책'] || raw['포지션'] || '').toString().trim(),\n  message: (raw.message || raw['문의'] || '').toString().trim(),\n  utm_source: raw.utm_source || '',\n  utm_campaign: raw.utm_campaign || '',\n  received_at: new Date().toISOString(),\n};\n\nif (!lead.email || !lead.email.includes('@')) {\n  throw new Error('Invalid email in form submission');\n}\n\nreturn [{ json: lead }];"
+      },
+      "id": "normalize",
+      "name": "Normalize Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/v1/people/match",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"api_key\": \"{{ $env.APOLLO_API_KEY }}\",\n  \"email\": \"{{ $json.email }}\",\n  \"reveal_personal_emails\": false\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "apollo-enrich",
+      "name": "Apollo: Enrich",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400],
+      "continueOnFail": true,
+      "notes": "Apollo enrich은 실패해도 워크플로 계속 (회사 정보 없어도 메일 발송)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge Apollo enrichment into lead. Tolerate failure.\nconst lead = $('Normalize Lead').item.json;\nconst apollo = $json?.person || {};\n\nconst enriched = {\n  ...lead,\n  company: lead.company || apollo.organization?.name || '',\n  role: lead.role || apollo.title || '',\n  domain: apollo.organization?.website_url || apollo.organization?.primary_domain || '',\n  linkedin_url: apollo.linkedin_url || '',\n  industry: apollo.organization?.industry || '',\n  company_size: apollo.organization?.estimated_num_employees || null,\n};\nreturn [{ json: enriched }];"
+      },
+      "id": "merge-enrich",
+      "name": "Merge Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You score and classify inbound leads. Return STRICT JSON:\n{\n  \"score\": 0-100,\n  \"persona\": \"founder | marketer | dev | other\",\n  \"hot_signal\": true|false,\n  \"reasoning\": \"<one sentence>\"\n}\n\nScore framework (start at 50, adjust):\n+20 if persona=founder OR marketer\n+15 if company_size >= 10\n+15 if industry suggests fit (SaaS, agency, ecommerce)\n+10 if message indicates clear use case or urgency\n+10 if utm_source = paid (already invested attention)\n-15 if free email domain (gmail/naver/yahoo)\n-10 if message empty AND no enrichment data\n\nhot_signal=true if score >= 70 OR message contains 'urgent'/'now'/'미팅'/'demo'.\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Email: {{ $json.email }}\nName: {{ $json.name }}\nCompany: {{ $json.company || 'unknown' }}\nRole: {{ $json.role || 'unknown' }}\nIndustry: {{ $json.industry || 'unknown' }}\nCompany size: {{ $json.company_size || 'unknown' }}\nUTM source: {{ $json.utm_source || 'direct' }}\nMessage: {{ $json.message || '(none)' }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 300,
+          "temperature": 0.2
+        }
+      },
+      "id": "claude-score",
+      "name": "Claude: Score + Classify",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet parsed;\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  parsed = { score: 50, persona: 'other', hot_signal: false, reasoning: 'parse failed' };\n}\nconst lead = $('Merge Enrichment').item.json;\nreturn [{ json: { ...lead, ...parsed } }];"
+      },
+      "id": "parse-score",
+      "name": "Parse Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_LEADS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.name || $json.email }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "email|email", "emailValue": "={{ $json.email }}" },
+            { "key": "company|rich_text", "textContent": "={{ $json.company }}" },
+            { "key": "role|rich_text", "textContent": "={{ $json.role }}" },
+            { "key": "domain|url", "urlValue": "={{ $json.domain }}" },
+            { "key": "linkedin_url|url", "urlValue": "={{ $json.linkedin_url }}" },
+            { "key": "source|select", "selectValue": "landing_page" },
+            { "key": "utm_source|rich_text", "textContent": "={{ $json.utm_source }}" },
+            { "key": "utm_campaign|rich_text", "textContent": "={{ $json.utm_campaign }}" },
+            { "key": "persona|select", "selectValue": "={{ $json.persona }}" },
+            { "key": "score|number", "numberValue": "={{ $json.score }}" },
+            { "key": "hot_signal|checkbox", "checkboxValue": "={{ $json.hot_signal }}" },
+            { "key": "sequence_status|select", "selectValue": "enrolled" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "richText": true, "textContent": "Message" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.message || '(no message)' }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Scoring Reasoning" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.reasoning }}" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Create Lead",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You write a Day-0 welcome email to an inbound lead.\n\nRequirements:\n- Length: 80-150 Korean characters body (≈400-600 chars in English)\n- Tone: warm but professional, 1인칭 단수, no marketing fluff\n- Reference 1 specific detail from their context (company/role/industry/message)\n- Offer ONE concrete next step (a relevant resource link OR a 15-min call link)\n- Do NOT include a generic \"learn more about us\" link\n- Match language: if name/message looks Korean, write in Korean; else English\n- Subject line MUST be under 60 chars and reference their context\n\nReturn STRICT JSON:\n{\n  \"subject\": \"<email subject>\",\n  \"body_html\": \"<HTML body, simple <p>/<a> only, no styling>\",\n  \"body_text\": \"<plain text version>\"\n}\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Lead info:\nName: {{ $('Parse Score').item.json.name }}\nEmail: {{ $('Parse Score').item.json.email }}\nCompany: {{ $('Parse Score').item.json.company || 'unknown' }}\nRole: {{ $('Parse Score').item.json.role || 'unknown' }}\nIndustry: {{ $('Parse Score').item.json.industry || 'unknown' }}\nPersona: {{ $('Parse Score').item.json.persona }}\nMessage from form: {{ $('Parse Score').item.json.message || '(no message)' }}\nHot signal: {{ $('Parse Score').item.json.hot_signal }}\n\nResource pool (pick ONE that matches their persona/message):\n- founder: \"Marketing automation playbook for solo founders\" → https://yourdomain.com/playbook\n- marketer: \"5 n8n templates we use in production\" → https://yourdomain.com/templates\n- dev: \"Self-host n8n with AI nodes in 10 min\" → https://yourdomain.com/selfhost\n- other: \"How we built our marketing automation\" → https://yourdomain.com/story\n\nIf hot_signal=true, replace resource with a 15-min call invite: https://cal.com/yourname/15min"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1000,
+          "temperature": 0.6
+        }
+      },
+      "id": "claude-email",
+      "name": "Claude: Welcome Email",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1780, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet email;\ntry {\n  email = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  email = { subject: 'Welcome', body_html: '<p>Thanks for reaching out!</p>', body_text: 'Thanks for reaching out!' };\n}\nconst lead = $('Parse Score').item.json;\nreturn [{ json: { ...lead, ...email } }];"
+      },
+      "id": "parse-email",
+      "name": "Parse Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.RESEND_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"{{ $env.RESEND_FROM_NAME }} <{{ $env.RESEND_FROM_EMAIL }}>\",\n  \"to\": \"{{ $json.email }}\",\n  \"subject\": {{ JSON.stringify($json.subject) }},\n  \"html\": {{ JSON.stringify($json.body_html) }},\n  \"text\": {{ JSON.stringify($json.body_text) }},\n  \"tags\": [\n    { \"name\": \"automation\", \"value\": \"07-lead-sequence\" },\n    { \"name\": \"stage\", \"value\": \"day0\" }\n  ]\n}",
+        "options": {}
+      },
+      "id": "resend-send",
+      "name": "Resend: Send Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": {
+          "__rl": true,
+          "value": "={{ $('Notion: Create Lead').item.json.id }}",
+          "mode": "id"
+        },
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "sequence_status|select", "selectValue": "day0_sent" },
+            { "key": "last_action_at|date", "date": "={{ $now }}" }
+          ]
+        }
+      },
+      "id": "notion-update",
+      "name": "Notion: Mark day0_sent",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2440, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "hot",
+              "leftValue": "={{ $('Parse Score').item.json.hot_signal }}",
+              "rightValue": "true",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-hot",
+      "name": "If Hot Lead",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2660, 400]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "=🔥 *HOT LEAD* (score {{ $('Parse Score').item.json.score }})\n*Name*: {{ $('Parse Score').item.json.name }} ({{ $('Parse Score').item.json.role || 'role unknown' }})\n*Email*: {{ $('Parse Score').item.json.email }}\n*Company*: {{ $('Parse Score').item.json.company || 'unknown' }} ({{ $('Parse Score').item.json.industry || '-' }})\n*Persona*: {{ $('Parse Score').item.json.persona }}\n*Why hot*: {{ $('Parse Score').item.json.reasoning }}\n\n*Message*:\n> {{ ($('Parse Score').item.json.message || '(none)').split('\\n').join('\\n> ').slice(0, 400) }}",
+        "otherOptions": {}
+      },
+      "id": "slack-hot",
+      "name": "Slack: Hot Lead Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true, \"lead_id\": \"{{ $('Notion: Create Lead').item.json.id }}\" }",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond to Form",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2660, 600]
+    }
+  ],
+  "connections": {
+    "Form Webhook": { "main": [[{ "node": "Normalize Lead", "type": "main", "index": 0 }]] },
+    "Normalize Lead": { "main": [[{ "node": "Apollo: Enrich", "type": "main", "index": 0 }]] },
+    "Apollo: Enrich": { "main": [[{ "node": "Merge Enrichment", "type": "main", "index": 0 }]] },
+    "Merge Enrichment": { "main": [[{ "node": "Claude: Score + Classify", "type": "main", "index": 0 }]] },
+    "Claude: Score + Classify": { "main": [[{ "node": "Parse Score", "type": "main", "index": 0 }]] },
+    "Parse Score": { "main": [[{ "node": "Notion: Create Lead", "type": "main", "index": 0 }]] },
+    "Notion: Create Lead": {
+      "main": [[
+        { "node": "Claude: Welcome Email", "type": "main", "index": 0 },
+        { "node": "Respond to Form", "type": "main", "index": 0 }
+      ]]
+    },
+    "Claude: Welcome Email": { "main": [[{ "node": "Parse Email", "type": "main", "index": 0 }]] },
+    "Parse Email": { "main": [[{ "node": "Resend: Send Email", "type": "main", "index": 0 }]] },
+    "Resend: Send Email": { "main": [[{ "node": "Notion: Mark day0_sent", "type": "main", "index": 0 }]] },
+    "Notion: Mark day0_sent": { "main": [[{ "node": "If Hot Lead", "type": "main", "index": 0 }]] },
+    "If Hot Lead": { "main": [[{ "node": "Slack: Hot Lead Alert", "type": "main", "index": 0 }], []] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "revenue-impact" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}
