@@ -1,0 +1,357 @@
+{
+  "name": "06 Ad Copy Evolution",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 22 * * 0" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Sunday 22:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "c-1", "name": "account_id", "value": "={{ $env.META_ADS_ACCOUNT_ID }}", "type": "string" },
+            { "id": "c-2", "name": "days_window", "value": "=7", "type": "number" },
+            { "id": "c-3", "name": "top_percent", "value": "=0.2", "type": "number" },
+            { "id": "c-4", "name": "variants_count", "value": "=10", "type": "number" },
+            { "id": "c-5", "name": "our_product_pitch", "value": "1인 창업자용 마케팅 자동화 SaaS. n8n 기반 셀프호스팅 옵션, AI 통합 워크플로, Notion·Slack·Meta 통합. 가격 $29~99/월.", "type": "string" }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build date range (last 7 days)\nconst days = $json.days_window;\nconst end = new Date();\nconst start = new Date(end.getTime() - days * 86400000);\nconst fmt = d => d.toISOString().slice(0, 10);\nreturn [{ json: { ...$json, since: fmt(start), until: fmt(end) } }];"
+      },
+      "id": "build-dates",
+      "name": "Build Date Range",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/act_{{ $json.account_id }}/insights",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "level", "value": "ad" },
+            { "name": "time_range", "value": "={\"since\":\"{{ $json.since }}\",\"until\":\"{{ $json.until }}\"}" },
+            { "name": "fields", "value": "ad_id,ad_name,adset_name,campaign_name,spend,impressions,clicks,actions,purchase_roas,ctr,cpc" },
+            { "name": "limit", "value": "200" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-insights",
+      "name": "Meta: Ad Insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse ROAS, sort, return top 20% and bottom 20% (for pattern contrast)\nconst data = $json.data || [];\nconst topPct = $('Config').first().json.top_percent;\n\nconst withRoas = data.map(d => {\n  const roasArr = d.purchase_roas || [];\n  const roas = roasArr.length ? parseFloat(roasArr[0].value) : 0;\n  return { ...d, roas: isNaN(roas) ? 0 : roas };\n}).filter(d => parseFloat(d.spend) > 0);\n\nwithRoas.sort((a, b) => b.roas - a.roas);\n\nconst n = withRoas.length;\nconst topN = Math.max(1, Math.ceil(n * topPct));\nconst top = withRoas.slice(0, topN);\nconst bottom = withRoas.slice(-topN);\n\nreturn [{ json: { top, bottom, total_ads: n, week_ending: $('Build Date Range').first().json.until } }];"
+      },
+      "id": "select-top",
+      "name": "Top/Bottom 20%",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Append daily summary rows to CampaignMetrics (one row per ad, weekly aggregate)\nconst topBottom = $json;\nconst rows = [];\nfor (const ad of [...topBottom.top, ...topBottom.bottom]) {\n  const purchases = (ad.actions || []).find(a => a.action_type === 'purchase')?.value || 0;\n  rows.push({\n    json: {\n      name: `${ad.ad_name || ad.ad_id} (week ${topBottom.week_ending})`,\n      channel: 'meta_ads',\n      entity_type: 'ad',\n      entity_id: ad.ad_id,\n      date: topBottom.week_ending,\n      period: 'weekly',\n      spend: parseFloat(ad.spend) || 0,\n      impressions: parseInt(ad.impressions) || 0,\n      clicks: parseInt(ad.clicks) || 0,\n      conversions: parseInt(purchases) || 0,\n      ctr: parseFloat(ad.ctr) || 0,\n      cpa: parseFloat(ad.cpc) || 0,\n      roas: ad.roas || 0,\n      notes: ad.adset_name + ' / ' + ad.campaign_name,\n    }\n  });\n}\nreturn rows;"
+      },
+      "id": "build-metrics",
+      "name": "Build Metrics Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 220]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CAMPAIGN_METRICS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.name }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "channel|select", "selectValue": "={{ $json.channel }}" },
+            { "key": "entity_type|select", "selectValue": "={{ $json.entity_type }}" },
+            { "key": "entity_id|rich_text", "textContent": "={{ $json.entity_id }}" },
+            { "key": "date|date", "date": "={{ $json.date }}" },
+            { "key": "period|select", "selectValue": "={{ $json.period }}" },
+            { "key": "spend|number", "numberValue": "={{ $json.spend }}" },
+            { "key": "impressions|number", "numberValue": "={{ $json.impressions }}" },
+            { "key": "clicks|number", "numberValue": "={{ $json.clicks }}" },
+            { "key": "conversions|number", "numberValue": "={{ $json.conversions }}" },
+            { "key": "ctr|number", "numberValue": "={{ $json.ctr }}" },
+            { "key": "cpa|number", "numberValue": "={{ $json.cpa }}" },
+            { "key": "roas|number", "numberValue": "={{ $json.roas }}" },
+            { "key": "notes|rich_text", "textContent": "={{ $json.notes }}" }
+          ]
+        }
+      },
+      "id": "notion-metrics",
+      "name": "Notion: Log Metrics",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1320, 220]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You analyze top-performing vs bottom-performing Meta ads to extract winning patterns.\n\nReturn STRICT JSON:\n{\n  \"hook_patterns\": [\"<pattern type, e.g. 'specific number in first 5 words'>\", \"...\"],\n  \"cta_patterns\": [\"<pattern type, e.g. 'soft ask — Learn → Read'>\", \"...\"],\n  \"emotional_triggers\": [\"<e.g., FOMO, social proof, savings>\", \"...\"],\n  \"avoid_patterns\": [\"<patterns common in losers, e.g. 'vague feature lists', 'industry jargon'>\", \"...\"],\n  \"summary\": \"<1 sentence: what wins in this account this week>\"\n}\n\nFocus on transferable patterns, not specific copy. Output language must match the ad copy language.\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Top 20% ads (ROAS-sorted, highest first):\n{{ JSON.stringify($('Top/Bottom 20%').first().json.top.map(a => ({ name: a.ad_name, roas: a.roas, ctr: a.ctr, spend: a.spend })), null, 2) }}\n\nBottom 20% ads:\n{{ JSON.stringify($('Top/Bottom 20%').first().json.bottom.map(a => ({ name: a.ad_name, roas: a.roas, ctr: a.ctr, spend: a.spend })), null, 2) }}\n\n⚠️ ad_name만 보임 (Meta Insights API는 카피 본문 미제공). 이름·캠페인명에서 추론 가능한 패턴만 추출."
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 800,
+          "temperature": 0.4
+        }
+      },
+      "id": "claude-pattern",
+      "name": "Claude: Extract Patterns",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1320, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet patterns;\ntry {\n  patterns = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  patterns = { hook_patterns: [], cta_patterns: [], emotional_triggers: [], avoid_patterns: [], summary: '' };\n}\nreturn [{ json: patterns }];"
+      },
+      "id": "parse-patterns",
+      "name": "Parse Patterns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 420]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CONTENT_DRAFTS }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 5,
+        "filters": {
+          "conditions": [
+            {
+              "key": "status|select",
+              "condition": "equals",
+              "selectValue": "published"
+            },
+            {
+              "key": "channel|select",
+              "condition": "equals",
+              "selectValue": "blog"
+            }
+          ]
+        },
+        "sort": {
+          "sortValue": [
+            { "key": "published_at|date", "direction": "descending" }
+          ]
+        }
+      },
+      "id": "fetch-content",
+      "name": "Fetch Recent Blog Posts",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1760, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Bundle patterns + content seeds for variant generation\nconst patterns = $('Parse Patterns').item.json;\nconst posts = $input.all().map(p => {\n  const props = p.json.properties || {};\n  return {\n    title: props.Name?.title?.[0]?.plain_text || '',\n    meta_desc: props.meta_desc?.rich_text?.[0]?.plain_text || '',\n    target_keyword: props.target_keyword?.select?.name || '',\n    url: props.published_url?.url || '',\n  };\n}).filter(p => p.title);\n\nreturn [{ json: { patterns, content_seeds: posts } }];"
+      },
+      "id": "bundle-seeds",
+      "name": "Bundle Patterns + Seeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 420]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You generate Meta ad copy variants based on winning patterns and content seeds.\n\nOur product: {{ $('Config').first().json.our_product_pitch }}\n\nRequirements per variant:\n- headline: <= 40 chars (Meta primary text)\n- body: 90-125 chars (Meta primary text body)\n- cta: 2-3 words, action verb (Learn More, Try Free, Get Started, See How)\n- pattern_used: which winning pattern it applies (from hook_patterns/cta_patterns input)\n\nReturn STRICT JSON:\n{\n  \"variants\": [\n    {\"headline\": \"...\", \"body\": \"...\", \"cta\": \"...\", \"pattern_used\": \"...\"},\n    ...\n  ]\n}\n\nGenerate {{ $('Config').first().json.variants_count }} variants.\n\nGuardrails (skip variants that violate these):\n- No superlatives (\"best\", \"#1\", \"the only\")\n- No income claims (\"earn $X\", \"guaranteed results\")\n- No before/after weight or appearance\n- No urgency lies (\"last chance\" when not true)\n- No clickbait (\"you won't believe\", \"this one trick\")\n\nUse content seeds as topic inspiration but write fresh ad copy (don't just paste blog titles).\nMatch language: if seeds are Korean, variants in Korean.\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Winning patterns:\nHooks: {{ $json.patterns.hook_patterns.join(' | ') }}\nCTAs: {{ $json.patterns.cta_patterns.join(' | ') }}\nEmotional triggers: {{ $json.patterns.emotional_triggers.join(' | ') }}\nAvoid: {{ $json.patterns.avoid_patterns.join(' | ') }}\n\nThis week's insight: {{ $json.patterns.summary }}\n\nContent seeds (recent published blog posts):\n{{ JSON.stringify($json.content_seeds, null, 2) }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 3000,
+          "temperature": 0.7
+        }
+      },
+      "id": "claude-variants",
+      "name": "Claude: Generate Variants",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2200, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet parsed;\ntry {\n  parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  return [];\n}\nconst variants = parsed.variants || [];\nconst patterns = $('Parse Patterns').item.json;\nconst weekEnding = $('Top/Bottom 20%').first().json.week_ending;\n\nreturn variants.map((v, i) => ({\n  json: {\n    index: i + 1,\n    week_ending: weekEnding,\n    title: `Meta Ad — ${v.headline?.slice(0, 50) || ('Variant ' + (i+1))}`,\n    headline: v.headline || '',\n    body: v.body || '',\n    cta: v.cta || 'Learn More',\n    pattern_used: v.pattern_used || patterns.summary?.slice(0, 100) || '',\n  }\n}));"
+      },
+      "id": "parse-variants",
+      "name": "Parse Variants",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 420]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CONTENT_DRAFTS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.title }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "channel|select", "selectValue": "meta_ad" },
+            { "key": "source_type|select", "selectValue": "ad_pattern" },
+            { "key": "body|rich_text", "textContent": "={{ $json.body }}" },
+            { "key": "meta_title|rich_text", "textContent": "={{ $json.headline }}" },
+            { "key": "cta|rich_text", "textContent": "={{ $json.cta }}" },
+            { "key": "pattern_used|rich_text", "textContent": "={{ $json.pattern_used }}" },
+            { "key": "status|select", "selectValue": "review" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "richText": true, "textContent": "Headline" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.headline }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Body" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.body }}" },
+            { "type": "heading_2", "richText": true, "textContent": "CTA" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.cta }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Pattern Used" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.pattern_used }}" }
+          ]
+        }
+      },
+      "id": "notion-variant",
+      "name": "Notion: Create Variant",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2640, 420]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "collect",
+      "name": "Collect All",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2860, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const variants = $input.all().map(i => i.json);\nconst patterns = $('Parse Patterns').item.json;\n\nlet text = `🎯 *주간 광고 카피 변형 ${variants.length}개 준비*\\n_지난 주 Top 20% 패턴 기반_\\n\\n`;\ntext += `*이번 주 인사이트*: ${patterns.summary}\\n\\n`;\ntext += `*Top 3 변형 (검토 우선)*:\\n`;\nvariants.slice(0, 3).forEach((v, i) => {\n  text += `\\n${i+1}. *${v.headline}*\\n   ${v.body}\\n   _CTA: ${v.cta} · 패턴: ${v.pattern_used.slice(0, 50)}_\\n`;\n});\ntext += `\\n_전체 ${variants.length}개는 Notion ContentDrafts (channel=meta_ad, status=review)_`;\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3080, 420]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: Variants Ready",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3300, 420]
+    }
+  ],
+  "connections": {
+    "Sunday 22:00": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Build Date Range", "type": "main", "index": 0 }]] },
+    "Build Date Range": { "main": [[{ "node": "Meta: Ad Insights", "type": "main", "index": 0 }]] },
+    "Meta: Ad Insights": { "main": [[{ "node": "Top/Bottom 20%", "type": "main", "index": 0 }]] },
+    "Top/Bottom 20%": {
+      "main": [[
+        { "node": "Build Metrics Rows", "type": "main", "index": 0 },
+        { "node": "Claude: Extract Patterns", "type": "main", "index": 0 }
+      ]]
+    },
+    "Build Metrics Rows": { "main": [[{ "node": "Notion: Log Metrics", "type": "main", "index": 0 }]] },
+    "Claude: Extract Patterns": { "main": [[{ "node": "Parse Patterns", "type": "main", "index": 0 }]] },
+    "Parse Patterns": { "main": [[{ "node": "Fetch Recent Blog Posts", "type": "main", "index": 0 }]] },
+    "Fetch Recent Blog Posts": { "main": [[{ "node": "Bundle Patterns + Seeds", "type": "main", "index": 0 }]] },
+    "Bundle Patterns + Seeds": { "main": [[{ "node": "Claude: Generate Variants", "type": "main", "index": 0 }]] },
+    "Claude: Generate Variants": { "main": [[{ "node": "Parse Variants", "type": "main", "index": 0 }]] },
+    "Parse Variants": { "main": [[{ "node": "Notion: Create Variant", "type": "main", "index": 0 }]] },
+    "Notion: Create Variant": { "main": [[{ "node": "Collect All", "type": "main", "index": 0 }]] },
+    "Collect All": { "main": [[{ "node": "Build Slack Digest", "type": "main", "index": 0 }]] },
+    "Build Slack Digest": { "main": [[{ "node": "Slack: Variants Ready", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "revenue-impact" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}
