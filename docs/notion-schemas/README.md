@@ -11,6 +11,7 @@
 | [`Inbox`](./inbox.md) | 03, 09 | `NOTION_DB_INBOX` |
 | [`CompetitorTimeline`](./competitor-timeline.md) | 04, 06, 09 | `NOTION_DB_COMPETITOR_TIMELINE` |
 | [`SEOOpportunities`](./seo-opportunities.md) | 05, 09 | `NOTION_DB_SEO_OPPORTUNITIES` |
+| [`UGCLibrary`](./ugc-library.md) | 08, 06, 10 | `NOTION_DB_UGC_LIBRARY` |
 
 ## 공통 규칙
 

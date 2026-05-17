@@ -1,0 +1,396 @@
+{
+  "name": "08 UGC Collector",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 9 * * *" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Daily 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "c-1", "name": "brand_hashtags", "value": "={{ ($env.BRAND_HASHTAGS || '').split(',').map(s => s.trim()).filter(Boolean) }}", "type": "array" },
+            { "id": "c-2", "name": "lookback_hours", "value": "={{ parseInt($env.UGC_LOOKBACK_HOURS || '24') }}", "type": "number" },
+            { "id": "c-3", "name": "min_usability_score", "value": "=7", "type": "number" }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.META_IG_USER_ID }}/tags",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "fields", "value": "id,caption,media_type,media_url,permalink,timestamp,username" },
+            { "name": "limit", "value": "50" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ig-tags",
+      "name": "IG: Tagged Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 220],
+      "continueOnFail": true,
+      "notes": "내 IG 계정을 태그한 게시물 (사진 속 태그). instagram_manage_comments 권한 필요."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Resolve each brand hashtag to an ID (one-time per run, cached in workflow data)\nconst hashtags = $('Config').first().json.brand_hashtags;\nreturn hashtags.map(h => ({ json: { hashtag: h } }));"
+      },
+      "id": "split-hashtags",
+      "name": "Per Hashtag",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 420]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/ig_hashtag_search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id", "value": "={{ $env.META_IG_USER_ID }}" },
+            { "name": "q", "value": "={{ $json.hashtag }}" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "resolve-hashtag",
+      "name": "Resolve Hashtag ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 420],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract first hashtag ID from response\nconst data = $json.data || [];\nif (!data.length) return [];\nconst hashtag = $('Per Hashtag').item.json.hashtag;\nreturn [{ json: { hashtag, hashtag_id: data[0].id } }];"
+      },
+      "id": "extract-hashtag-id",
+      "name": "Extract Hashtag ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 420]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.hashtag_id }}/recent_media",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id", "value": "={{ $env.META_IG_USER_ID }}" },
+            { "name": "fields", "value": "id,caption,media_type,media_url,permalink,timestamp" },
+            { "name": "limit", "value": "30" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "hashtag-media",
+      "name": "Hashtag: Recent Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 420],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize tag posts into common schema, filter to lookback window\nconst lookbackMs = $('Config').first().json.lookback_hours * 3600 * 1000;\nconst cutoff = Date.now() - lookbackMs;\nconst raw = $input.first().json;\nconst posts = raw?.data || [];\n\nreturn posts\n  .filter(p => p.timestamp && new Date(p.timestamp).getTime() >= cutoff)\n  .map(p => ({\n    json: {\n      channel: 'instagram_tag',\n      external_id: p.id,\n      author: p.username || 'unknown',\n      author_handle: p.username ? `@${p.username}` : '',\n      content: p.caption || '',\n      media_url: p.media_url || '',\n      source_url: p.permalink || '',\n      posted_at: p.timestamp,\n      captured_at: new Date().toISOString(),\n    }\n  }));"
+      },
+      "id": "normalize-tags",
+      "name": "Normalize IG Tags",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize hashtag posts (similar to tags, but channel = instagram_hashtag)\nconst lookbackMs = $('Config').first().json.lookback_hours * 3600 * 1000;\nconst cutoff = Date.now() - lookbackMs;\nconst raw = $input.first().json;\nconst posts = raw?.data || [];\nconst hashtag = $('Extract Hashtag ID').item.json.hashtag;\n\nreturn posts\n  .filter(p => p.timestamp && new Date(p.timestamp).getTime() >= cutoff)\n  .map(p => ({\n    json: {\n      channel: 'instagram_hashtag',\n      external_id: p.id,\n      author: 'hashtag_post',\n      author_handle: `#${hashtag}`,\n      content: p.caption || '',\n      media_url: p.media_url || '',\n      source_url: p.permalink || '',\n      posted_at: p.timestamp,\n      captured_at: new Date().toISOString(),\n    }\n  }));"
+      },
+      "id": "normalize-hashtags",
+      "name": "Normalize Hashtag Media",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 420]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge",
+      "name": "Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1760, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_UGC_LIBRARY }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "external_id|rich_text",
+              "condition": "equals",
+              "richTextValue": "={{ $json.external_id }}"
+            }
+          ]
+        }
+      },
+      "id": "check-exists",
+      "name": "Already In Library?",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1980, 320],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "new",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "empty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-new",
+      "name": "If New",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2200, 320]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You analyze a user-generated post mentioning a brand to determine if it's usable as marketing asset.\n\nReturn STRICT JSON:\n{\n  \"sentiment\": \"positive | neutral | negative\",\n  \"usability_score\": 0-10,\n  \"pull_quote\": \"<the most quotable single sentence, or empty if none>\",\n  \"usage_formats\": [\"carousel\", \"ad_creative\", \"lp_testimonial\", \"repost\", \"case_study\"],\n  \"reasoning\": \"<one sentence on why this score>\"\n}\n\nUsability score guide:\n- 0-3: low quality, generic, no specifics, vague\n- 4-6: ok content but missing key elements (specific result, emotion, story)\n- 7-8: clear positive experience, quotable, has specifics\n- 9-10: exceptional — specific numbers, emotional story, transformative\n\nusage_formats array: include ONLY the formats that fit this content. Be selective — most posts fit 1-2 formats max.\n- carousel: visual-first post with photo + commentary\n- ad_creative: short, punchy, quotable text\n- lp_testimonial: full sentences about outcome/benefit\n- repost: photo-heavy, brand visible\n- case_study: detailed story with context\n\nNegative sentiment = usage_formats empty, usability_score 0. Negative content needs ops routing, not asset use.\n\nNo prose, no markdown, no code fences. Match content language."
+            },
+            {
+              "content": "=Channel: {{ $json.channel }}\nAuthor: {{ $json.author }} ({{ $json.author_handle }})\nMedia URL: {{ $json.media_url || '(none)' }}\nPosted: {{ $json.posted_at }}\n\nContent:\n{{ $json.content }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 600,
+          "temperature": 0.3
+        }
+      },
+      "id": "claude-classify",
+      "name": "Claude: UGC Classify",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2420, 240]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet a;\ntry {\n  a = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  a = { sentiment: 'neutral', usability_score: 0, pull_quote: '', usage_formats: [], reasoning: 'parse failed' };\n}\nconst src = $('Merge Sources').item.json;\nreturn [{ json: { ...src, ...a } }];"
+      },
+      "id": "parse-claude",
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, 240]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "quality",
+              "leftValue": "={{ $json.usability_score }}",
+              "rightValue": "={{ $('Config').first().json.min_usability_score }}",
+              "operator": { "type": "number", "operation": "gte" }
+            },
+            {
+              "id": "positive",
+              "leftValue": "={{ $json.sentiment }}",
+              "rightValue": "positive",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "filter-quality",
+      "name": "Quality + Positive",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2860, 240]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_UGC_LIBRARY }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.author }} on {{ $json.channel }} — {{ ($json.pull_quote || $json.content).slice(0, 30) }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "channel|select", "selectValue": "={{ $json.channel }}" },
+            { "key": "author|rich_text", "textContent": "={{ $json.author }}" },
+            { "key": "author_handle|rich_text", "textContent": "={{ $json.author_handle }}" },
+            { "key": "content|rich_text", "textContent": "={{ $json.content.slice(0, 1900) }}" },
+            { "key": "pull_quote|rich_text", "textContent": "={{ $json.pull_quote }}" },
+            { "key": "media_url|url", "urlValue": "={{ $json.media_url }}" },
+            { "key": "source_url|url", "urlValue": "={{ $json.source_url }}" },
+            { "key": "external_id|rich_text", "textContent": "={{ $json.external_id }}" },
+            { "key": "captured_at|date", "date": "={{ $json.captured_at }}" },
+            { "key": "posted_at|date", "date": "={{ $json.posted_at }}" },
+            { "key": "sentiment|select", "selectValue": "={{ $json.sentiment }}" },
+            { "key": "usability_score|number", "numberValue": "={{ $json.usability_score }}" },
+            { "key": "usage_formats|multi_select", "multiSelectValue": "={{ ($json.usage_formats || []).join(',') }}" },
+            { "key": "permission_status|select", "selectValue": "needs_permission" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Add to Library",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [3080, 160]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "collect",
+      "name": "Collect All",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [3300, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\nif (!items.length) return [{ json: { text: '' } }];\n\nitems.sort((a, b) => b.usability_score - a.usability_score);\nconst top3 = items.slice(0, 3);\n\nlet text = `⭐ *오늘의 UGC ${items.length}개 수집* — 허락 요청 우선순위:\\n\\n`;\ntop3.forEach((u, i) => {\n  text += `${i+1}. *${u.author_handle || u.author}* on ${u.channel} (score ${u.usability_score}/10)\\n`;\n  if (u.pull_quote) text += `   > ${u.pull_quote}\\n`;\n  text += `   포맷: ${(u.usage_formats || []).join(', ') || '—'}\\n`;\n  text += `   <${u.source_url}|원본 보기>\\n\\n`;\n});\nif (items.length > 3) text += `_나머지 ${items.length - 3}개는 Notion UGCLibrary 참고_`;\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3520, 160]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "non-empty",
+              "leftValue": "={{ $json.text }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-has-items",
+      "name": "Has Items?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3740, 160]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: UGC Digest",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3960, 100]
+    }
+  ],
+  "connections": {
+    "Daily 09:00": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": {
+      "main": [[
+        { "node": "IG: Tagged Media", "type": "main", "index": 0 },
+        { "node": "Per Hashtag", "type": "main", "index": 0 }
+      ]]
+    },
+    "IG: Tagged Media": { "main": [[{ "node": "Normalize IG Tags", "type": "main", "index": 0 }]] },
+    "Per Hashtag": { "main": [[{ "node": "Resolve Hashtag ID", "type": "main", "index": 0 }]] },
+    "Resolve Hashtag ID": { "main": [[{ "node": "Extract Hashtag ID", "type": "main", "index": 0 }]] },
+    "Extract Hashtag ID": { "main": [[{ "node": "Hashtag: Recent Media", "type": "main", "index": 0 }]] },
+    "Hashtag: Recent Media": { "main": [[{ "node": "Normalize Hashtag Media", "type": "main", "index": 0 }]] },
+    "Normalize IG Tags": { "main": [[{ "node": "Merge Sources", "type": "main", "index": 0 }]] },
+    "Normalize Hashtag Media": { "main": [[{ "node": "Merge Sources", "type": "main", "index": 1 }]] },
+    "Merge Sources": { "main": [[{ "node": "Already In Library?", "type": "main", "index": 0 }]] },
+    "Already In Library?": { "main": [[{ "node": "If New", "type": "main", "index": 0 }]] },
+    "If New": { "main": [[{ "node": "Claude: UGC Classify", "type": "main", "index": 0 }], []] },
+    "Claude: UGC Classify": { "main": [[{ "node": "Parse Classification", "type": "main", "index": 0 }]] },
+    "Parse Classification": { "main": [[{ "node": "Quality + Positive", "type": "main", "index": 0 }]] },
+    "Quality + Positive": { "main": [[{ "node": "Notion: Add to Library", "type": "main", "index": 0 }], []] },
+    "Notion: Add to Library": { "main": [[{ "node": "Collect All", "type": "main", "index": 0 }]] },
+    "Collect All": { "main": [[{ "node": "Build Slack Digest", "type": "main", "index": 0 }]] },
+    "Build Slack Digest": { "main": [[{ "node": "Has Items?", "type": "main", "index": 0 }]] },
+    "Has Items?": { "main": [[{ "node": "Slack: UGC Digest", "type": "main", "index": 0 }], []] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "content-machine" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}
