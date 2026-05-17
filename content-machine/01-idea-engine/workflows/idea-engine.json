@@ -1,0 +1,490 @@
+{
+  "name": "01 Content Idea Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Daily 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "kw-1",
+              "name": "keywords",
+              "value": "={{ [\"n8n automation\", \"marketing automation\", \"solo founder\", \"saas growth\", \"ai workflow\"] }}",
+              "type": "array"
+            },
+            {
+              "id": "kw-2",
+              "name": "subreddits",
+              "value": "={{ [\"SaaS\", \"marketing\", \"Entrepreneur\", \"automation\", \"n8n\"] }}",
+              "type": "array"
+            },
+            {
+              "id": "kw-3",
+              "name": "min_score",
+              "value": "=6",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "set-config",
+      "name": "Config (edit keywords here)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300],
+      "notes": "키워드·서브레딧·임계값을 여기서만 수정. 다른 노드는 이 값을 참조."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.reddit.com/r/{{ $json.subreddits.join('+') }}/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.keywords.join(' OR ') }}"
+            },
+            {
+              "name": "restrict_sr",
+              "value": "on"
+            },
+            {
+              "name": "sort",
+              "value": "new"
+            },
+            {
+              "name": "t",
+              "value": "day"
+            },
+            {
+              "name": "limit",
+              "value": "50"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "marketing-lab-idea-engine/0.1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reddit-search",
+      "name": "Reddit Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.twitter.com/2/tweets/search/recent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "=({{ $json.keywords.map(k => '\"' + k + '\"').join(' OR ') }}) lang:en -is:retweet min_replies:2"
+            },
+            {
+              "name": "max_results",
+              "value": "50"
+            },
+            {
+              "name": "tweet.fields",
+              "value": "author_id,public_metrics,created_at"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "x-search",
+      "name": "X Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize Reddit + X into one schema\nconst items = [];\n\n// Reddit\nconst redditRaw = $input.first().json?.data?.children ?? [];\nfor (const child of redditRaw) {\n  const p = child.data;\n  if (!p) continue;\n  items.push({\n    source: 'reddit',\n    source_url: `https://reddit.com${p.permalink}`,\n    author: p.author,\n    content: `${p.title}\\n\\n${p.selftext || ''}`.slice(0, 2000),\n    engagement: (p.score || 0) + (p.num_comments || 0) * 2,\n    created_at: new Date((p.created_utc || 0) * 1000).toISOString(),\n  });\n}\n\n// X (assume second input is X)\nconst xRaw = $input.last().json?.data ?? [];\nfor (const t of xRaw) {\n  const m = t.public_metrics || {};\n  items.push({\n    source: 'x',\n    source_url: `https://x.com/i/status/${t.id}`,\n    author: t.author_id,\n    content: t.text || '',\n    engagement: (m.like_count || 0) + (m.reply_count || 0) * 3 + (m.retweet_count || 0) * 2,\n    created_at: t.created_at,\n  });\n}\n\n// Dedup by content hash\nconst seen = new Set();\nconst deduped = [];\nfor (const i of items) {\n  const key = i.content.toLowerCase().replace(/\\s+/g, ' ').slice(0, 200);\n  if (seen.has(key)) continue;\n  seen.add(key);\n  deduped.push(i);\n}\n\n// Sort by engagement, take top 30 (to limit LLM calls)\ndeduped.sort((a, b) => b.engagement - a.engagement);\nreturn deduped.slice(0, 30).map(i => ({ json: i }));"
+      },
+      "id": "normalize-dedup",
+      "name": "Normalize + Dedup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ $('prompts').first().json.extract_prompt }}",
+              "role": "system"
+            },
+            {
+              "content": "=Source: {{ $json.source }}\nURL: {{ $json.source_url }}\nEngagement: {{ $json.engagement }}\nContent:\n{{ $json.content }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 600,
+          "temperature": 0.3,
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "claude-extract",
+      "name": "Claude: Extract Pain Point",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1120, 300],
+      "notes": "프롬프트는 prompts/extract-painpoint.md를 시스템 메시지로 로드. JSON 응답 강제."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude JSON output and merge with original item\nconst rawResponse = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet parsed;\ntry {\n  parsed = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;\n} catch (e) {\n  return [];\n}\n\nconst original = $('Normalize + Dedup').item.json;\n\nreturn [{\n  json: {\n    ...original,\n    pain_point: parsed.pain_point,\n    titles: parsed.titles || [],\n    keyword: parsed.keyword,\n    score: parsed.score || 0,\n  }\n}];"
+      },
+      "id": "parse-claude",
+      "name": "Parse LLM Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "score-filter",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": "={{ $('Config (edit keywords here)').first().json.min_score }}",
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "score-filter",
+      "name": "Score >= threshold",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CONTENT_IDEAS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.titles[0] || $json.pain_point.slice(0, 80) }}",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "pain_point|rich_text",
+              "textContent": "={{ $json.pain_point }}"
+            },
+            {
+              "key": "source|select",
+              "selectValue": "={{ $json.source }}"
+            },
+            {
+              "key": "source_url|url",
+              "urlValue": "={{ $json.source_url }}"
+            },
+            {
+              "key": "keyword|select",
+              "selectValue": "={{ $json.keyword }}"
+            },
+            {
+              "key": "score|number",
+              "numberValue": "={{ $json.score }}"
+            },
+            {
+              "key": "engagement|number",
+              "numberValue": "={{ $json.engagement }}"
+            },
+            {
+              "key": "status|select",
+              "selectValue": "new"
+            }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "heading_2",
+              "richText": true,
+              "textContent": "Suggested Titles"
+            },
+            {
+              "type": "bulleted_list_item",
+              "richText": true,
+              "textContent": "={{ ($json.titles || []).join('\\n• ') }}"
+            },
+            {
+              "type": "heading_2",
+              "richText": true,
+              "textContent": "Source Quote"
+            },
+            {
+              "type": "quote",
+              "richText": true,
+              "textContent": "={{ $json.content.slice(0, 500) }}"
+            }
+          ]
+        }
+      },
+      "id": "notion-append",
+      "name": "Notion: Append Idea",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1780, 220]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-all",
+      "name": "Collect All Ideas",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2000, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build daily digest message for Slack\nconst all = $input.all().map(i => i.json);\nall.sort((a, b) => b.score - a.score);\nconst top5 = all.slice(0, 5);\n\nlet text = `*🎯 오늘의 콘텐츠 아이디어 ${all.length}개*\\n신규 수집 (score >= ${$('Config (edit keywords here)').first().json.min_score})\\n\\n`;\n\ntop5.forEach((item, idx) => {\n  text += `*${idx + 1}. ${item.titles?.[0] || item.pain_point.slice(0, 80)}*\\n`;\n  text += `   페인: ${item.pain_point}\\n`;\n  text += `   키워드: \\`${item.keyword}\\` · score ${item.score} · ${item.source}\\n`;\n  text += `   <${item.source_url}|소스 보기>\\n\\n`;\n});\n\ntext += `\\n전체 보기: Notion ContentIdeas DB`;\n\nreturn [{ json: { text, count: all.length } }];"
+      },
+      "id": "build-digest",
+      "name": "Build Slack Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 220]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#content-ideas",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: #content-ideas",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2440, 220]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "prompt-1",
+              "name": "extract_prompt",
+              "value": "=You are a content strategist analyzing Reddit/X posts to find blog topic opportunities.\n\nGiven a post, extract:\n1. pain_point: the underlying frustration or unmet need (1 sentence, Korean preferred if source allows)\n2. titles: 3 catchy blog post titles that would address this pain (each <= 60 chars)\n3. keyword: the single most relevant target keyword from this list: {{ $('Config (edit keywords here)').first().json.keywords.join(', ') }}. If none match, return \"other\".\n4. score: 0-10 — how clearly the post reveals a content opportunity. Reserve 8+ for posts where the author explicitly says \"I wish there was...\" or \"How do I...\".\n\nReturn STRICT JSON only:\n{\"pain_point\":\"...\",\"titles\":[\"...\",\"...\",\"...\"],\"keyword\":\"...\",\"score\":N}\n\nNo prose, no markdown, no code fences.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "prompts",
+      "name": "prompts",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 480],
+      "notes": "프롬프트 단일 출처. extract-painpoint.md 내용을 여기 동기화."
+    }
+  ],
+  "connections": {
+    "Daily 07:00": {
+      "main": [
+        [
+          {
+            "node": "Config (edit keywords here)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config (edit keywords here)": {
+      "main": [
+        [
+          {
+            "node": "Reddit Search",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "X Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reddit Search": {
+      "main": [
+        [
+          {
+            "node": "Normalize + Dedup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "X Search": {
+      "main": [
+        [
+          {
+            "node": "Normalize + Dedup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize + Dedup": {
+      "main": [
+        [
+          {
+            "node": "Claude: Extract Pain Point",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: Extract Pain Point": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM Output": {
+      "main": [
+        [
+          {
+            "node": "Score >= threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score >= threshold": {
+      "main": [
+        [
+          {
+            "node": "Notion: Append Idea",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Notion: Append Idea": {
+      "main": [
+        [
+          {
+            "node": "Collect All Ideas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect All Ideas": {
+      "main": [
+        [
+          {
+            "node": "Build Slack Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack Digest": {
+      "main": [
+        [
+          {
+            "node": "Slack: #content-ideas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    {
+      "name": "marketing-lab"
+    },
+    {
+      "name": "content-machine"
+    }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
