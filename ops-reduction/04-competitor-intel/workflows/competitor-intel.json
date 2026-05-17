@@ -1,0 +1,349 @@
+{
+  "name": "04 Competitor Intel",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 8 * * *" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Daily 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "comp-1",
+              "name": "competitors",
+              "value": "={{ [\n  {\n    \"name\": \"Competitor A\",\n    \"domain\": \"competitor-a.com\",\n    \"blog_rss\": \"https://competitor-a.com/blog/rss.xml\",\n    \"pricing_url\": \"https://competitor-a.com/pricing\",\n    \"meta_page_id\": \"\"\n  },\n  {\n    \"name\": \"Competitor B\",\n    \"domain\": \"competitor-b.com\",\n    \"blog_rss\": \"https://competitor-b.com/feed\",\n    \"pricing_url\": \"https://competitor-b.com/pricing\",\n    \"meta_page_id\": \"\"\n  }\n] }}",
+              "type": "array"
+            },
+            {
+              "id": "comp-2",
+              "name": "our_context",
+              "value": "1인 창업자용 마케팅 자동화 SaaS. 가격 $29~99/월. 차별점: n8n 기반 셀프호스팅 옵션.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config (edit competitors)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 400],
+      "notes": "경쟁사 리스트와 우리 컨텍스트(Claude 분석용)를 여기서만 수정."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "competitors",
+        "options": {}
+      },
+      "id": "split-competitors",
+      "name": "Split per Competitor",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [640, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.blog_rss }}",
+        "options": {
+          "response": {
+            "response": { "responseFormat": "text" }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-rss",
+      "name": "Fetch Blog RSS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse RSS/Atom and return entries from last 24h\nconst competitor = $('Split per Competitor').item.json;\nconst raw = $input.first().json.data || $input.first().json;\nconst text = typeof raw === 'string' ? raw : String(raw);\n\nconst yesterday = Date.now() - 24 * 60 * 60 * 1000;\nconst entries = [];\n\n// Atom <entry>\nconst atomEntryRe = /<entry>([\\s\\S]*?)<\\/entry>/g;\nlet m;\nwhile ((m = atomEntryRe.exec(text)) !== null) {\n  const block = m[1];\n  const title = (block.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/) || [])[1]?.trim();\n  const link = (block.match(/<link[^>]*href=\"([^\"]+)\"/) || [])[1];\n  const id = (block.match(/<id>([\\s\\S]*?)<\\/id>/) || [])[1]?.trim();\n  const updated = (block.match(/<(updated|published)>([\\s\\S]*?)<\\/(updated|published)>/) || [])[2]?.trim();\n  if (!title) continue;\n  const ts = updated ? new Date(updated).getTime() : Date.now();\n  if (ts < yesterday) continue;\n  entries.push({ title: title.replace(/<!\\[CDATA\\[|\\]\\]>/g, ''), link, external_id: id || link, captured_at: updated });\n}\n\n// RSS 2.0 <item>\nconst rssItemRe = /<item>([\\s\\S]*?)<\\/item>/g;\nwhile ((m = rssItemRe.exec(text)) !== null) {\n  const block = m[1];\n  const title = (block.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/) || [])[1]?.trim();\n  const link = (block.match(/<link[^>]*>([\\s\\S]*?)<\\/link>/) || [])[1]?.trim();\n  const guid = (block.match(/<guid[^>]*>([\\s\\S]*?)<\\/guid>/) || [])[1]?.trim();\n  const pubDate = (block.match(/<pubDate>([\\s\\S]*?)<\\/pubDate>/) || [])[1]?.trim();\n  if (!title) continue;\n  const ts = pubDate ? new Date(pubDate).getTime() : Date.now();\n  if (ts < yesterday) continue;\n  entries.push({ title: title.replace(/<!\\[CDATA\\[|\\]\\]>/g, ''), link, external_id: guid || link, captured_at: pubDate });\n}\n\nreturn entries.map(e => ({\n  json: {\n    competitor: competitor.name,\n    source: 'blog',\n    raw_payload: e.title,\n    source_url: e.link,\n    external_id: e.external_id,\n    captured_at: e.captured_at,\n  }\n}));"
+      },
+      "id": "parse-rss",
+      "name": "Parse Blog Entries (24h)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.pricing_url }}",
+        "options": {
+          "response": {
+            "response": { "responseFormat": "text" }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-pricing",
+      "name": "Fetch Pricing HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract visible text from HTML and compute hash\nconst competitor = $('Split per Competitor').item.json;\nconst raw = $input.first().json.data || $input.first().json;\nconst html = typeof raw === 'string' ? raw : String(raw);\n\n// Strip scripts/styles, then tags\nconst stripped = html\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<!--[\\s\\S]*?-->/g, '')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim();\n\n// Simple hash (FNV-1a 32-bit, hex)\nfunction hash(s) {\n  let h = 0x811c9dc5;\n  for (let i = 0; i < s.length; i++) {\n    h ^= s.charCodeAt(i);\n    h = (h * 0x01000193) >>> 0;\n  }\n  return h.toString(16).padStart(8, '0');\n}\n\nreturn [{\n  json: {\n    competitor: competitor.name,\n    source: 'pricing',\n    raw_payload: stripped.slice(0, 4000),\n    source_url: competitor.pricing_url,\n    external_id: `${competitor.name}-pricing`,\n    snapshot_hash: hash(stripped),\n    captured_at: new Date().toISOString(),\n  }\n}];"
+      },
+      "id": "extract-pricing",
+      "name": "Extract Pricing Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v19.0/ads_archive",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "search_page_ids", "value": "={{ $json.meta_page_id }}" },
+            { "name": "ad_active_status", "value": "ACTIVE" },
+            { "name": "ad_reached_countries", "value": "['KR','US']" },
+            { "name": "fields", "value": "id,ad_creation_time,ad_creative_bodies,ad_creative_link_titles,ad_snapshot_url" },
+            { "name": "limit", "value": "20" },
+            { "name": "access_token", "value": "={{ $env.META_GRAPH_ACCESS_TOKEN }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-ad-library",
+      "name": "Fetch Meta Ad Library",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 600],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Skip if no meta_page_id configured\nconst competitor = $('Split per Competitor').item.json;\nif (!competitor.meta_page_id) return [];\n\nconst raw = $input.first().json;\nconst ads = raw?.data || [];\nconst yesterday = Date.now() - 24 * 60 * 60 * 1000;\n\nreturn ads\n  .filter(a => a.ad_creation_time && new Date(a.ad_creation_time).getTime() > yesterday)\n  .map(a => ({\n    json: {\n      competitor: competitor.name,\n      source: 'meta_ads',\n      raw_payload: `${(a.ad_creative_link_titles || []).join(' | ')}\\n\\n${(a.ad_creative_bodies || []).join('\\n---\\n').slice(0, 2000)}`,\n      source_url: a.ad_snapshot_url || '',\n      external_id: a.id,\n      captured_at: a.ad_creation_time,\n    }\n  }));"
+      },
+      "id": "parse-ads",
+      "name": "Parse New Ads (24h)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 600]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-sources",
+      "name": "Merge per Competitor",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_COMPETITOR_TIMELINE }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "external_id|rich_text",
+              "condition": "equals",
+              "richTextValue": "={{ $json.external_id }}"
+            }
+          ]
+        }
+      },
+      "id": "check-prev",
+      "name": "Lookup Previous",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1560, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide whether to analyze:\n// - blog/meta_ads: skip if external_id already exists (already processed)\n// - pricing: process if hash differs from previous snapshot\nconst current = $('Merge per Competitor').item.json;\nconst prev = $json;\nconst prevExists = !!prev.id;\n\nlet changed = false;\nlet prevText = '';\n\nif (current.source === 'pricing') {\n  if (!prevExists) {\n    changed = true; // first time, store snapshot\n  } else {\n    const prevHashProp = prev.properties?.snapshot_hash?.rich_text?.[0]?.plain_text || '';\n    if (prevHashProp !== current.snapshot_hash) {\n      changed = true;\n      prevText = prev.properties?.raw_payload?.rich_text?.[0]?.plain_text || '';\n    }\n  }\n} else {\n  // blog or meta_ads: external_id-based dedup\n  changed = !prevExists;\n}\n\nif (!changed) return [];\nreturn [{ json: { ...current, prev_text: prevText, is_first_snapshot: !prevExists } }];"
+      },
+      "id": "decide-change",
+      "name": "Detect Real Change",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 400]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You analyze competitor activity from one of: blog post, pricing page change, or new ad creative.\n\nOur context: {{ $('Config (edit competitors)').first().json.our_context }}\n\nReturn STRICT JSON:\n{\n  \"summary\": \"<2-sentence summary of what changed/launched>\",\n  \"category\": \"pricing | positioning | feature | content | launch | other\",\n  \"impact_score\": 0-10,\n  \"our_action\": \"<one specific action we should consider, or 'none — informational only'>\",\n  \"reasoning\": \"<one sentence why impact_score>\"\n}\n\nImpact scale:\n- 0-3: informational, no action needed\n- 4-6: worth tracking, may inform next quarter\n- 7-8: should respond this week\n- 9-10: urgent — competitor moved on our positioning\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Competitor: {{ $json.competitor }}\nSource: {{ $json.source }}\nFirst snapshot: {{ $json.is_first_snapshot }}\nURL: {{ $json.source_url }}\n\nCurrent content:\n{{ $json.raw_payload }}\n\n{{ $json.prev_text ? '\\nPrevious snapshot (for diff):\\n' + $json.prev_text.slice(0, 1500) : '' }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 600,
+          "temperature": 0.3
+        }
+      },
+      "id": "claude-analyze",
+      "name": "Claude: Analyze Change",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse LLM output, build 2 rows (snapshot + change) for pricing, 1 row (change) for blog/ads\nconst raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet analysis;\ntry {\n  analysis = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  return [];\n}\n\nconst ctx = $('Detect Real Change').item.json;\nconst now = new Date().toISOString();\nconst rows = [];\n\n// CHANGE row (skip if first_snapshot for pricing — only store snapshot)\nif (ctx.source !== 'pricing' || !ctx.is_first_snapshot) {\n  rows.push({\n    json: {\n      row_type: 'change',\n      title: `${ctx.competitor}: ${ctx.source} — ${analysis.summary.slice(0, 30)}`,\n      competitor: ctx.competitor,\n      source: ctx.source,\n      entry_type: 'change',\n      external_id: ctx.external_id + '-' + Date.now(),\n      source_url: ctx.source_url,\n      captured_at: now,\n      summary: analysis.summary,\n      category: analysis.category,\n      impact_score: analysis.impact_score,\n      our_action: analysis.our_action,\n      raw_payload: ctx.raw_payload?.slice(0, 1800) || '',\n      snapshot_hash: ctx.snapshot_hash || '',\n      reasoning: analysis.reasoning,\n    }\n  });\n}\n\n// SNAPSHOT row (pricing only, always update on change)\nif (ctx.source === 'pricing') {\n  rows.push({\n    json: {\n      row_type: 'snapshot',\n      title: `${ctx.competitor}: pricing snapshot ${now.slice(0, 10)}`,\n      competitor: ctx.competitor,\n      source: 'pricing',\n      entry_type: 'snapshot',\n      external_id: ctx.external_id,\n      source_url: ctx.source_url,\n      captured_at: now,\n      summary: 'Latest pricing page snapshot',\n      category: 'pricing',\n      impact_score: 0,\n      our_action: '',\n      raw_payload: ctx.raw_payload?.slice(0, 1800) || '',\n      snapshot_hash: ctx.snapshot_hash,\n      reasoning: '',\n    }\n  });\n}\n\nreturn rows;"
+      },
+      "id": "build-rows",
+      "name": "Build Notion Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_COMPETITOR_TIMELINE }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.title }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "competitor|select", "selectValue": "={{ $json.competitor }}" },
+            { "key": "source|select", "selectValue": "={{ $json.source }}" },
+            { "key": "entry_type|select", "selectValue": "={{ $json.entry_type }}" },
+            { "key": "external_id|rich_text", "textContent": "={{ $json.external_id }}" },
+            { "key": "source_url|url", "urlValue": "={{ $json.source_url }}" },
+            { "key": "captured_at|date", "date": "={{ $json.captured_at }}" },
+            { "key": "summary|rich_text", "textContent": "={{ $json.summary }}" },
+            { "key": "category|select", "selectValue": "={{ $json.category }}" },
+            { "key": "impact_score|number", "numberValue": "={{ $json.impact_score }}" },
+            { "key": "our_action|rich_text", "textContent": "={{ $json.our_action }}" },
+            { "key": "raw_payload|rich_text", "textContent": "={{ $json.raw_payload }}" },
+            { "key": "snapshot_hash|rich_text", "textContent": "={{ $json.snapshot_hash }}" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Append",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2440, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "is-change",
+              "leftValue": "={{ $json.entry_type }}",
+              "rightValue": "change",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-change",
+      "name": "Only Changes",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2660, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const i = $json;\nconst impactEmoji = i.impact_score >= 7 ? '🚨' : i.impact_score >= 4 ? '⚠️' : 'ℹ️';\n\nconst text = `${impactEmoji} *${i.competitor}* / ${i.source} (impact ${i.impact_score}/10)\\n` +\n  `*${i.category}*\\n` +\n  `${i.summary}\\n\\n` +\n  `*우리 액션*: ${i.our_action || '—'}\\n` +\n  (i.source_url ? `<${i.source_url}|원본 보기>` : '');\n\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_COMPETITOR }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: #competitor-intel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3100, 300]
+    }
+  ],
+  "connections": {
+    "Daily 08:00": { "main": [[{ "node": "Config (edit competitors)", "type": "main", "index": 0 }]] },
+    "Config (edit competitors)": { "main": [[{ "node": "Split per Competitor", "type": "main", "index": 0 }]] },
+    "Split per Competitor": {
+      "main": [[
+        { "node": "Fetch Blog RSS", "type": "main", "index": 0 },
+        { "node": "Fetch Pricing HTML", "type": "main", "index": 0 },
+        { "node": "Fetch Meta Ad Library", "type": "main", "index": 0 }
+      ]]
+    },
+    "Fetch Blog RSS": { "main": [[{ "node": "Parse Blog Entries (24h)", "type": "main", "index": 0 }]] },
+    "Fetch Pricing HTML": { "main": [[{ "node": "Extract Pricing Text", "type": "main", "index": 0 }]] },
+    "Fetch Meta Ad Library": { "main": [[{ "node": "Parse New Ads (24h)", "type": "main", "index": 0 }]] },
+    "Parse Blog Entries (24h)": { "main": [[{ "node": "Merge per Competitor", "type": "main", "index": 0 }]] },
+    "Extract Pricing Text": { "main": [[{ "node": "Merge per Competitor", "type": "main", "index": 1 }]] },
+    "Parse New Ads (24h)": { "main": [[{ "node": "Merge per Competitor", "type": "main", "index": 2 }]] },
+    "Merge per Competitor": { "main": [[{ "node": "Lookup Previous", "type": "main", "index": 0 }]] },
+    "Lookup Previous": { "main": [[{ "node": "Detect Real Change", "type": "main", "index": 0 }]] },
+    "Detect Real Change": { "main": [[{ "node": "Claude: Analyze Change", "type": "main", "index": 0 }]] },
+    "Claude: Analyze Change": { "main": [[{ "node": "Build Notion Rows", "type": "main", "index": 0 }]] },
+    "Build Notion Rows": { "main": [[{ "node": "Notion: Append", "type": "main", "index": 0 }]] },
+    "Notion: Append": { "main": [[{ "node": "Only Changes", "type": "main", "index": 0 }]] },
+    "Only Changes": { "main": [[{ "node": "Build Slack Alert", "type": "main", "index": 0 }], []] },
+    "Build Slack Alert": { "main": [[{ "node": "Slack: #competitor-intel", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "ops-reduction" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}

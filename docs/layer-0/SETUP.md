@@ -11,7 +11,7 @@
 ## 0. 체크리스트 (전체)
 
 - [ ] **1.** n8n 인스턴스 (Docker/Railway/cloud)
-- [ ] **2.** Notion 워크스페이스 + DB 5종 (`ContentIdeas`, `ContentDrafts`, `Leads`, `CampaignMetrics`, `Inbox`)
+- [ ] **2.** Notion 워크스페이스 + DB 6종 (`ContentIdeas`, `ContentDrafts`, `Leads`, `CampaignMetrics`, `Inbox`, `CompetitorTimeline`)
 - [ ] **3.** Slack 워크스페이스 + 5개 채널 + 봇 토큰
 - [ ] **4.** API 키 발급 (Anthropic, OpenAI 선택)
 - [ ] **5.** n8n credentials 등록 (Notion / Slack / Anthropic)
@@ -59,7 +59,7 @@ n8n URL 접속 → owner 계정 생성 → 워크스페이스 진입.
 
 ---
 
-## 2. Notion 워크스페이스 + DB 5종
+## 2. Notion 워크스페이스 + DB 6종
 
 ### 2.1 Integration 만들기
 
@@ -70,9 +70,9 @@ n8n URL 접속 → owner 계정 생성 → 워크스페이스 진입.
 5. Capabilities: **Read / Update / Insert content**
 6. **Internal Integration Secret** 복사 → 어딘가 안전한 곳에 보관 (n8n credentials에 곧 등록)
 
-### 2.2 DB 5종 생성
+### 2.2 DB 6종 생성
 
-Notion에서 새 페이지 **Full page database** 5개 만든다. 스키마는 [`../notion-schemas/`](../notion-schemas/) 참고:
+Notion에서 새 페이지 **Full page database** 6개 만든다. 스키마는 [`../notion-schemas/`](../notion-schemas/) 참고:
 
 | DB | 용도 | 사용 자동화 |
 |---|---|---|
@@ -81,6 +81,7 @@ Notion에서 새 페이지 **Full page database** 5개 만든다. 스키마는 [
 | [`Leads`](../notion-schemas/leads.md) | 리드 + enrich 데이터 | 07 |
 | [`CampaignMetrics`](../notion-schemas/campaign-metrics.md) | 광고·이메일·LP 성과 | 06, 09, 10 |
 | [`Inbox`](../notion-schemas/inbox.md) | 댓글·DM·문의 통합 | 03, 09 |
+| [`CompetitorTimeline`](../notion-schemas/competitor-timeline.md) | 경쟁사 변화 시계열 | 04, 06, 09 |
 
 각 DB마다:
 1. 스키마 문서 보고 속성 추가
@@ -158,6 +159,7 @@ NOTION_DB_CONTENT_DRAFTS=<32자 hex>
 NOTION_DB_LEADS=<32자 hex>
 NOTION_DB_CAMPAIGN_METRICS=<32자 hex>
 NOTION_DB_INBOX=<32자 hex>
+NOTION_DB_COMPETITOR_TIMELINE=<32자 hex>
 
 SLACK_CHANNEL_LOG=#automation-log
 SLACK_CHANNEL_IDEAS=#content-ideas
@@ -216,7 +218,7 @@ Hello World가 수동 실행으로 도착 확인되면:
 
 ## 9. Layer 0 완료 시그널
 
-✅ Notion에 DB 5개가 보임 (ContentIdeas, ContentDrafts, Leads, CampaignMetrics, Inbox)
+✅ Notion에 DB 6개가 보임 (ContentIdeas, ContentDrafts, Leads, CampaignMetrics, Inbox, CompetitorTimeline)
 ✅ Slack에 채널 5개와 봇이 있음
 ✅ n8n에 credential 3개가 등록됨
 ✅ Hello World가 Slack에 메시지를 보냄
