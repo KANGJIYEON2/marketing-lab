@@ -2,14 +2,14 @@
 
 > Google Search Console에서 2페이지 키워드 자동 발굴 → 기존 글 업데이트 액션
 
-**카테고리**: [content-machine](../README.md) · **로드맵**: Week 5 · **상태**: PRD only
+**카테고리**: [content-machine](../README.md) · **로드맵**: Week 5 · **상태**: MVP 구현 완료
 
 ## 진입점
 
 - [`PRD.md`](./PRD.md) — 페인포인트·KPI·워크플로 다이어그램·MVP 범위
-- `SETUP.md` — 구현 시 작성 예정
-- `prompts/seo-action-items.md` — 구현 시 추가
-- `workflows/seo-hunter.json` — n8n 임포트용 (구현 시 추가)
+- [`SETUP.md`](./SETUP.md) — GSC API·Serpapi·priority_score 산식
+- [`prompts/seo-action-items.md`](./prompts/seo-action-items.md) — my page + Top 10 비교 → 구체적 액션
+- [`workflows/seo-hunter.json`](./workflows/seo-hunter.json) — n8n 임포트용
 
 ## 폴더 구조
 

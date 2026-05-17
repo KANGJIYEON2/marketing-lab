@@ -1,0 +1,374 @@
+{
+  "name": "05 SEO 11-20 Hunter",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 6 * * 1" }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "Weekly Mon 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "c-1", "name": "site_url", "value": "={{ $env.GSC_SITE_URL }}", "type": "string" },
+            { "id": "c-2", "name": "days_window", "value": "=28", "type": "number" },
+            { "id": "c-3", "name": "min_impressions", "value": "=100", "type": "number" },
+            { "id": "c-4", "name": "top_n_for_serp", "value": "=10", "type": "number" },
+            { "id": "c-5", "name": "avg_top10_ctr", "value": "=0.12", "type": "number" }
+          ]
+        }
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build start/end dates for last 28 days\nconst days = $json.days_window;\nconst end = new Date();\nconst start = new Date(end.getTime() - days * 86400000);\nconst fmt = d => d.toISOString().slice(0, 10);\nreturn [{\n  json: {\n    ...$json,\n    start_date: fmt(start),\n    end_date: fmt(end)\n  }\n}];"
+      },
+      "id": "build-dates",
+      "name": "Build Date Range",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://searchconsole.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent($json.site_url) }}/searchAnalytics/query",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"startDate\": \"{{ $json.start_date }}\",\n  \"endDate\": \"{{ $json.end_date }}\",\n  \"dimensions\": [\"page\", \"query\"],\n  \"rowLimit\": 5000,\n  \"dataState\": \"final\"\n}",
+        "options": {}
+      },
+      "id": "fetch-gsc",
+      "name": "GSC: Search Analytics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 400],
+      "notes": "Google API credential 필요 (OAuth2). Search Console 권한 추가 site URL 등록 필수."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter to position 11-20 + impressions >= threshold\n// Then per URL pick the keyword with highest impressions\nconst cfg = $('Config').first().json;\nconst rows = $json.rows || [];\nconst minImp = cfg.min_impressions;\nconst avgCtr = cfg.avg_top10_ctr;\n\nconst filtered = rows.filter(r => r.position >= 11 && r.position <= 20 && r.impressions >= minImp);\n\n// Group by URL → keep the row with max impressions\nconst byUrl = new Map();\nfor (const r of filtered) {\n  const url = r.keys[0];\n  const query = r.keys[1];\n  const current = byUrl.get(url);\n  if (!current || r.impressions > current.impressions) {\n    byUrl.set(url, {\n      url,\n      keyword: query,\n      position: r.position,\n      impressions: r.impressions,\n      clicks: r.clicks,\n      ctr: r.ctr,\n    });\n  }\n}\n\n// Compute priority_score = impressions × (avg_top10_ctr - current_ctr)\nconst opps = [...byUrl.values()].map(o => ({\n  ...o,\n  priority_score: Math.round(o.impressions * Math.max(0, avgCtr - o.ctr)),\n  external_id: `${o.url}::${o.keyword}`,\n}));\n\n// Sort desc by priority_score\nopps.sort((a, b) => b.priority_score - a.priority_score);\n\nreturn opps.map(o => ({ json: o }));"
+      },
+      "id": "filter-opps",
+      "name": "Filter Opportunities",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_SEO_OPPORTUNITIES }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "Name|title",
+              "condition": "equals",
+              "titleValue": "={{ $json.keyword }} — {{ new URL($json.url).pathname }}"
+            }
+          ]
+        }
+      },
+      "id": "check-exists",
+      "name": "Already Tracked?",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1320, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "not-exists",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "empty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-new",
+      "name": "If New",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1540, 400]
+    },
+    {
+      "parameters": {
+        "operation": "limit",
+        "maxItems": "={{ $('Config').first().json.top_n_for_serp }}"
+      },
+      "id": "top-n",
+      "name": "Top N for SERP",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [1760, 320],
+      "notes": "비용 통제: 상위 N개만 SERP/Claude 호출. 나머지는 SERP 없이 Notion에 적재 (다른 분기)."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Filter Opportunities').item.json.url }}",
+        "options": {
+          "response": { "response": { "responseFormat": "text" } },
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-my-page",
+      "name": "Fetch My Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 220],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $('Filter Opportunities').item.json.keyword }}" },
+            { "name": "engine", "value": "google" },
+            { "name": "num", "value": "10" },
+            { "name": "hl", "value": "ko" },
+            { "name": "api_key", "value": "={{ $env.SERPAPI_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "id": "serp-api",
+      "name": "SERP: Top 10",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 420],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Bundle: my page text + SERP top 10 summary\nconst opp = $('Filter Opportunities').item.json;\n\n// Strip HTML from my page\nconst myRaw = $('Fetch My Page').item.json.data || $('Fetch My Page').item.json;\nconst myHtml = typeof myRaw === 'string' ? myRaw : String(myRaw);\nconst myText = myHtml\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, '')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .slice(0, 6000);\n\n// Extract Top 10 from SERP\nconst serp = $('SERP: Top 10').item.json;\nconst topResults = (serp.organic_results || []).slice(0, 10).map(r => ({\n  position: r.position,\n  title: r.title || '',\n  snippet: r.snippet || '',\n  link: r.link || ''\n}));\n\nreturn [{\n  json: {\n    ...opp,\n    my_text: myText,\n    serp_results: topResults\n  }\n}];"
+      },
+      "id": "bundle-context",
+      "name": "Bundle Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 320]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You analyze why a page is stuck on page 2 of Google and propose specific updates to push it to page 1.\n\nGiven:\n- My page text (currently positioned 11-20 for the target keyword)\n- Top 10 SERP results (titles + snippets)\n\nReturn STRICT JSON:\n{\n  \"serp_summary\": \"<2-3 sentences on what Top 10 results emphasize/cover>\",\n  \"missing_sections\": [\"<section topic 1>\", \"<section topic 2>\", \"...\"],\n  \"weak_points\": [\"<weakness 1>\", \"...\"],\n  \"action_items\": [\"<concrete action 1>\", \"<concrete action 2>\", \"...\"]\n}\n\nAction item rules:\n- Each item starts with a verb (Add, Replace, Expand, Rewrite, Restructure, Include, Update)\n- Reference specific content (e.g., \"Add a 'pricing comparison' table covering X, Y, Z\" not just \"Add comparison\")\n- 3-5 items max — prioritize impact over quantity\n- Skip generic SEO advice (\"add internal links\", \"improve speed\")\n\nNo prose, no markdown, no code fences."
+            },
+            {
+              "content": "=Target keyword: {{ $json.keyword }}\nCurrent position: {{ $json.position }}\nImpressions (28d): {{ $json.impressions }}\nCTR: {{ $json.ctr }}\n\nMy page URL: {{ $json.url }}\nMy page text (truncated):\n---\n{{ $json.my_text }}\n---\n\nTop 10 SERP results:\n{{ JSON.stringify($json.serp_results, null, 2) }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1200,
+          "temperature": 0.3
+        }
+      },
+      "id": "claude-analyze",
+      "name": "Claude: SEO Action Items",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2420, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet analysis;\ntry {\n  analysis = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  analysis = { serp_summary: '', missing_sections: [], weak_points: [], action_items: [] };\n}\nconst ctx = $('Bundle Context').item.json;\nreturn [{\n  json: {\n    ...ctx,\n    serp_summary: analysis.serp_summary || '',\n    missing_sections: analysis.missing_sections || [],\n    weak_points: analysis.weak_points || [],\n    action_items: analysis.action_items || []\n  }\n}];"
+      },
+      "id": "parse-analysis",
+      "name": "Parse Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_SEO_OPPORTUNITIES }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.keyword }} — {{ new URL($json.url).pathname }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "url|url", "urlValue": "={{ $json.url }}" },
+            { "key": "keyword|rich_text", "textContent": "={{ $json.keyword }}" },
+            { "key": "position|number", "numberValue": "={{ $json.position }}" },
+            { "key": "impressions|number", "numberValue": "={{ $json.impressions }}" },
+            { "key": "clicks|number", "numberValue": "={{ $json.clicks }}" },
+            { "key": "ctr|number", "numberValue": "={{ $json.ctr }}" },
+            { "key": "priority_score|number", "numberValue": "={{ $json.priority_score }}" },
+            { "key": "action_items|rich_text", "textContent": "={{ ($json.action_items || []).map((a,i) => (i+1)+'. '+a).join('\\n') }}" },
+            { "key": "missing_sections|rich_text", "textContent": "={{ ($json.missing_sections || []).join('\\n• ') }}" },
+            { "key": "weak_points|rich_text", "textContent": "={{ ($json.weak_points || []).join('\\n• ') }}" },
+            { "key": "status|select", "selectValue": "new" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "richText": true, "textContent": "Top 10 SERP Summary" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ $json.serp_summary }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Action Items" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ ($json.action_items || []).map((a,i) => (i+1)+'. '+a).join('\\n\\n') }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Missing Sections" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ ($json.missing_sections || []).map(s => '• '+s).join('\\n') }}" },
+            { "type": "heading_2", "richText": true, "textContent": "Weak Points" },
+            { "type": "paragraph", "richText": true, "textContent": "={{ ($json.weak_points || []).map(s => '• '+s).join('\\n') }}" }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Add Opportunity",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2860, 320]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "collect",
+      "name": "Collect All",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [3080, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "const opps = $input.all().map(i => i.json);\nopps.sort((a, b) => b.priority_score - a.priority_score);\nconst top5 = opps.slice(0, 5);\n\nlet text = `🔍 *이번 주 SEO 기회 ${opps.length}개*\\n_28일 GSC 11-20위 키워드 기반, priority_score 내림차순_\\n\\n`;\n\ntop5.forEach((o, i) => {\n  text += `*${i+1}. ${o.keyword}* (position ${o.position?.toFixed(1)})\\n`;\n  text += `   📈 ${o.impressions} impressions · CTR ${(o.ctr*100).toFixed(1)}% → +${o.priority_score} 클릭 예상\\n`;\n  text += `   📄 <${o.url}|기존 글>\\n`;\n  if (o.action_items?.length) {\n    text += `   액션: ${o.action_items[0]}\\n`;\n  }\n  text += `\\n`;\n});\n\nif (opps.length > 5) {\n  text += `_나머지 ${opps.length - 5}개는 Notion SEOOpportunities DB 참고_`;\n}\n\nreturn [{ json: { text } }];"
+      },
+      "id": "build-digest",
+      "name": "Build Slack Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3300, 320]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: SEO Digest",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3520, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_SEO_OPPORTUNITIES }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.keyword }} — {{ new URL($json.url).pathname }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "url|url", "urlValue": "={{ $json.url }}" },
+            { "key": "keyword|rich_text", "textContent": "={{ $json.keyword }}" },
+            { "key": "position|number", "numberValue": "={{ $json.position }}" },
+            { "key": "impressions|number", "numberValue": "={{ $json.impressions }}" },
+            { "key": "clicks|number", "numberValue": "={{ $json.clicks }}" },
+            { "key": "ctr|number", "numberValue": "={{ $json.ctr }}" },
+            { "key": "priority_score|number", "numberValue": "={{ $json.priority_score }}" },
+            { "key": "action_items|rich_text", "textContent": "(LLM analysis skipped — beyond top N)" },
+            { "key": "status|select", "selectValue": "new" }
+          ]
+        }
+      },
+      "id": "notion-create-tail",
+      "name": "Notion: Add (skipped LLM)",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1980, 520],
+      "notes": "Top N 이외 기회들도 추적용으로 적재. LLM 분석은 다음 주에 우선순위 올라오면 자동으로."
+    }
+  ],
+  "connections": {
+    "Weekly Mon 06:00": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Build Date Range", "type": "main", "index": 0 }]] },
+    "Build Date Range": { "main": [[{ "node": "GSC: Search Analytics", "type": "main", "index": 0 }]] },
+    "GSC: Search Analytics": { "main": [[{ "node": "Filter Opportunities", "type": "main", "index": 0 }]] },
+    "Filter Opportunities": { "main": [[{ "node": "Already Tracked?", "type": "main", "index": 0 }]] },
+    "Already Tracked?": { "main": [[{ "node": "If New", "type": "main", "index": 0 }]] },
+    "If New": {
+      "main": [[
+        { "node": "Top N for SERP", "type": "main", "index": 0 },
+        { "node": "Notion: Add (skipped LLM)", "type": "main", "index": 0 }
+      ], []]
+    },
+    "Top N for SERP": {
+      "main": [[
+        { "node": "Fetch My Page", "type": "main", "index": 0 },
+        { "node": "SERP: Top 10", "type": "main", "index": 0 }
+      ]]
+    },
+    "Fetch My Page": { "main": [[{ "node": "Bundle Context", "type": "main", "index": 0 }]] },
+    "SERP: Top 10": { "main": [[{ "node": "Bundle Context", "type": "main", "index": 1 }]] },
+    "Bundle Context": { "main": [[{ "node": "Claude: SEO Action Items", "type": "main", "index": 0 }]] },
+    "Claude: SEO Action Items": { "main": [[{ "node": "Parse Analysis", "type": "main", "index": 0 }]] },
+    "Parse Analysis": { "main": [[{ "node": "Notion: Add Opportunity", "type": "main", "index": 0 }]] },
+    "Notion: Add Opportunity": { "main": [[{ "node": "Collect All", "type": "main", "index": 0 }]] },
+    "Collect All": { "main": [[{ "node": "Build Slack Digest", "type": "main", "index": 0 }]] },
+    "Build Slack Digest": { "main": [[{ "node": "Slack: SEO Digest", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [{ "name": "marketing-lab" }, { "name": "content-machine" }],
+  "meta": { "templateCredsSetupCompleted": false }
+}

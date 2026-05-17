@@ -10,6 +10,7 @@
 | [`CampaignMetrics`](./campaign-metrics.md) | 06, 07, 09, 10 | `NOTION_DB_CAMPAIGN_METRICS` |
 | [`Inbox`](./inbox.md) | 03, 09 | `NOTION_DB_INBOX` |
 | [`CompetitorTimeline`](./competitor-timeline.md) | 04, 06, 09 | `NOTION_DB_COMPETITOR_TIMELINE` |
+| [`SEOOpportunities`](./seo-opportunities.md) | 05, 09 | `NOTION_DB_SEO_OPPORTUNITIES` |
 
 ## 공통 규칙
 
