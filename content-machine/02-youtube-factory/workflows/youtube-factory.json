@@ -1,0 +1,480 @@
+{
+  "name": "02 YouTube → Multi-channel Factory",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Every 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-1",
+              "name": "channel_id",
+              "value": "={{ $env.YOUTUBE_CHANNEL_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-2",
+              "name": "brand_tone",
+              "value": "친근하지만 전문적, 1인칭 단수, 한국어 (영상이 영어면 영어로). 과장된 표현·이모지 자제.",
+              "type": "string"
+            },
+            {
+              "id": "cfg-3",
+              "name": "target_keyword_pool",
+              "value": "={{ [\"n8n automation\", \"marketing automation\", \"solo founder\", \"saas growth\", \"ai workflow\"] }}",
+              "type": "array"
+            },
+            {
+              "id": "cfg-4",
+              "name": "transcript_api",
+              "value": "supadata",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300],
+      "notes": "채널 ID는 .env의 YOUTUBE_CHANNEL_ID. 브랜드 톤·키워드 풀은 여기서 수정. transcript_api 옵션은 supadata / youtube-transcript / apify."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.youtube.com/feeds/videos.xml?channel_id={{ $json.channel_id }}",
+        "options": {}
+      },
+      "id": "fetch-rss",
+      "name": "Fetch YouTube RSS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Atom feed, return latest 5 entries\nconst xml = $input.first().json.data || $input.first().json;\nconst text = typeof xml === 'string' ? xml : xml.toString();\n\nconst entries = [];\nconst entryRegex = /<entry>([\\s\\S]*?)<\\/entry>/g;\nlet match;\nwhile ((match = entryRegex.exec(text)) !== null) {\n  const block = match[1];\n  const get = (tag) => {\n    const m = block.match(new RegExp(`<${tag}[^>]*>([\\\\s\\\\S]*?)<\\\\/${tag}>`));\n    return m ? m[1].trim() : null;\n  };\n  const getAttr = (tag, attr) => {\n    const m = block.match(new RegExp(`<${tag}[^>]*${attr}=\"([^\"]+)\"`));\n    return m ? m[1] : null;\n  };\n  entries.push({\n    video_id: get('yt:videoId'),\n    title: get('title'),\n    published: get('published'),\n    url: getAttr('link', 'href'),\n    description: (block.match(/<media:description>([\\s\\S]*?)<\\/media:description>/) || [])[1]?.trim() || ''\n  });\n}\n\nreturn entries.slice(0, 5).map(e => ({ json: e }));"
+      },
+      "id": "parse-rss",
+      "name": "Parse RSS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CONTENT_DRAFTS }}",
+          "mode": "id"
+        },
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "source_ref|url",
+              "condition": "contains",
+              "urlValue": "={{ $json.video_id }}"
+            }
+          ]
+        }
+      },
+      "id": "check-exists",
+      "name": "Already Processed?",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1120, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "not-exists",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-new",
+      "name": "If New Video",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.supadata.ai/v1/youtube/transcript",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "videoId",
+              "value": "={{ $('Parse RSS').item.json.video_id }}"
+            },
+            {
+              "name": "text",
+              "value": "true"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.SUPADATA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-transcript",
+      "name": "Fetch Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 220],
+      "notes": "SETUP.md의 transcript API 옵션 참고. supadata.ai 또는 apify·youtube-transcript-api로 교체 가능."
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are analyzing a YouTube video transcript to extract reusable content building blocks.\n\nReturn STRICT JSON:\n{\n  \"core_message\": \"<one-sentence thesis of the video>\",\n  \"chapters\": [{\"title\":\"...\",\"summary\":\"...\"}],\n  \"pull_quotes\": [\"...\",\"...\",\"...\"],\n  \"target_keyword\": \"<one from: {{ $('Config').first().json.target_keyword_pool.join(', ') }}, or 'other'>\",\n  \"audience\": \"<persona in one phrase>\"\n}\n\nNo prose, no markdown, no code fences. Output language: match transcript language."
+            },
+            {
+              "content": "=Title: {{ $('Parse RSS').item.json.title }}\nDescription: {{ $('Parse RSS').item.json.description }}\n\nTranscript:\n{{ $json.content || $json.text || $json.transcript }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1500,
+          "temperature": 0.3
+        }
+      },
+      "id": "analyze-video",
+      "name": "Claude: Analyze Video",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [1780, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude output and bundle with transcript + metadata\nconst raw = $json.message?.content?.[0]?.text || $json.content || $json.text;\nlet analysis;\ntry {\n  analysis = typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n} catch (e) {\n  return [];\n}\n\nconst rss = $('Parse RSS').item.json;\nconst transcriptRaw = $('Fetch Transcript').item.json;\nconst transcript = transcriptRaw.content || transcriptRaw.text || transcriptRaw.transcript || '';\n\nreturn [{\n  json: {\n    video_id: rss.video_id,\n    video_url: rss.url,\n    video_title: rss.title,\n    transcript,\n    ...analysis\n  }\n}];"
+      },
+      "id": "parse-analysis",
+      "name": "Bundle Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 220]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are writing a SEO-optimized blog post derived from a YouTube video.\n\nBrand tone: {{ $('Config').first().json.brand_tone }}\n\nRequirements:\n- 1500-2500 chars body (Korean) or 1500-2500 words (English) — match transcript language\n- Structure: H1 + intro (3 lines) + 3-5 H2 sections + conclusion\n- Use the chapters and pull_quotes from input as anchors\n- Embed the original video link near top: <iframe-style markdown link>\n- End with one CTA line\n\nReturn STRICT JSON:\n{\n  \"meta_title\": \"<<=60 chars>\",\n  \"meta_desc\": \"<<=155 chars>\",\n  \"body_markdown\": \"<full body, no front-matter>\"\n}"
+            },
+            {
+              "content": "=Video URL: {{ $json.video_url }}\nTitle: {{ $json.video_title }}\nCore: {{ $json.core_message }}\nTarget keyword: {{ $json.target_keyword }}\nAudience: {{ $json.audience }}\n\nChapters:\n{{ JSON.stringify($json.chapters) }}\n\nPull quotes:\n{{ $json.pull_quotes.join('\\n- ') }}\n\nTranscript (truncate ok):\n{{ $json.transcript.slice(0, 8000) }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 3000,
+          "temperature": 0.5
+        }
+      },
+      "id": "gen-blog",
+      "name": "Claude: Blog Post",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2220, 100]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are writing an X (Twitter) thread from a YouTube video.\n\nBrand tone: {{ $('Config').first().json.brand_tone }}\n\nRequirements:\n- 8-10 tweets total\n- Tweet 1: strong hook (<280 chars), no link\n- Tweets 2-N: one insight per tweet, each <=280 chars\n- Last tweet: include the video link + 1-line CTA\n- Use chapters as content backbone\n- Match transcript language\n\nReturn STRICT JSON:\n{\n  \"tweets\": [\"tweet 1\", \"tweet 2\", ...]\n}"
+            },
+            {
+              "content": "=Video URL: {{ $json.video_url }}\nCore: {{ $json.core_message }}\n\nChapters:\n{{ JSON.stringify($json.chapters) }}\n\nPull quotes:\n{{ $json.pull_quotes.join('\\n- ') }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1500,
+          "temperature": 0.6
+        }
+      },
+      "id": "gen-x",
+      "name": "Claude: X Thread",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2220, 220]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are writing a LinkedIn post from a YouTube video.\n\nBrand tone: {{ $('Config').first().json.brand_tone }} (slightly more professional)\n\nRequirements:\n- 1000-1500 chars\n- Hook in first 2 lines (LinkedIn truncates)\n- 3-4 short paragraphs separated by blank lines\n- 1 personal angle / takeaway\n- End with: video link + question to prompt comments\n- No hashtag spam (max 3)\n- Match transcript language\n\nReturn STRICT JSON:\n{\n  \"post\": \"<full LinkedIn post text>\"\n}"
+            },
+            {
+              "content": "=Video URL: {{ $json.video_url }}\nCore: {{ $json.core_message }}\n\nChapters:\n{{ JSON.stringify($json.chapters) }}\n\nAudience: {{ $json.audience }}"
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1200,
+          "temperature": 0.6
+        }
+      },
+      "id": "gen-linkedin",
+      "name": "Claude: LinkedIn",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1.3,
+      "position": [2220, 340]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse each channel's LLM output\nfunction parseJSON(node) {\n  const raw = node?.message?.content?.[0]?.text || node?.content || node?.text;\n  try {\n    return typeof raw === 'string' ? JSON.parse(raw.replace(/^```json\\s*|\\s*```$/g, '')) : raw;\n  } catch (e) {\n    return null;\n  }\n}\n\nconst ctx = $('Bundle Context').item.json;\nconst blog = parseJSON($('Claude: Blog Post').item.json);\nconst xThread = parseJSON($('Claude: X Thread').item.json);\nconst linkedin = parseJSON($('Claude: LinkedIn').item.json);\n\n// Return 3 rows — one per channel\nreturn [\n  {\n    json: {\n      channel: 'blog',\n      title: blog?.meta_title || ctx.video_title,\n      meta_desc: blog?.meta_desc || '',\n      body: blog?.body_markdown || '',\n      source_ref: ctx.video_url,\n      target_keyword: ctx.target_keyword,\n      video_id: ctx.video_id,\n    }\n  },\n  {\n    json: {\n      channel: 'x_thread',\n      title: `[X thread] ${ctx.video_title}`,\n      meta_desc: '',\n      body: (xThread?.tweets || []).map((t, i) => `${i+1}/ ${t}`).join('\\n\\n'),\n      source_ref: ctx.video_url,\n      target_keyword: ctx.target_keyword,\n      video_id: ctx.video_id,\n    }\n  },\n  {\n    json: {\n      channel: 'linkedin',\n      title: `[LinkedIn] ${ctx.video_title}`,\n      meta_desc: '',\n      body: linkedin?.post || '',\n      source_ref: ctx.video_url,\n      target_keyword: ctx.target_keyword,\n      video_id: ctx.video_id,\n    }\n  }\n];"
+      },
+      "id": "build-rows",
+      "name": "Build 3 Notion Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 220]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "={{ $env.NOTION_DB_CONTENT_DRAFTS }}",
+          "mode": "id"
+        },
+        "title": "={{ $json.title }}",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "channel|select",
+              "selectValue": "={{ $json.channel }}"
+            },
+            {
+              "key": "source_type|select",
+              "selectValue": "youtube_video"
+            },
+            {
+              "key": "source_ref|url",
+              "urlValue": "={{ $json.source_ref }}"
+            },
+            {
+              "key": "meta_desc|rich_text",
+              "textContent": "={{ $json.meta_desc }}"
+            },
+            {
+              "key": "target_keyword|select",
+              "selectValue": "={{ $json.target_keyword }}"
+            },
+            {
+              "key": "status|select",
+              "selectValue": "review"
+            }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "heading_2",
+              "richText": true,
+              "textContent": "Body"
+            },
+            {
+              "type": "paragraph",
+              "richText": true,
+              "textContent": "={{ $json.body.slice(0, 1900) }}"
+            }
+          ]
+        }
+      },
+      "id": "notion-create",
+      "name": "Notion: Create Draft",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [2660, 220]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-channels",
+      "name": "Collect All 3",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [2880, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst videoTitle = $('Bundle Context').first().json.video_title;\nconst videoUrl = $('Bundle Context').first().json.video_url;\n\nconst text = `🎬 *신규 영상 파생 콘텐츠 ${rows.length}종 준비*\\n\\n` +\n  `*${videoTitle}*\\n<${videoUrl}|YouTube에서 보기>\\n\\n` +\n  rows.map(r => `• ${r.channel}: \"${r.title}\"`).join('\\n') +\n  `\\n\\n검토: Notion ContentDrafts (status=review 필터)`;\n\nreturn [{ json: { text } }];"
+      },
+      "id": "build-slack",
+      "name": "Build Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 220]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_CHANNEL_LOG }}",
+          "mode": "name"
+        },
+        "text": "={{ $json.text }}",
+        "otherOptions": {}
+      },
+      "id": "slack-post",
+      "name": "Slack: #automation-log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3320, 220]
+    }
+  ],
+  "connections": {
+    "Every 30 min": {
+      "main": [[{ "node": "Config", "type": "main", "index": 0 }]]
+    },
+    "Config": {
+      "main": [[{ "node": "Fetch YouTube RSS", "type": "main", "index": 0 }]]
+    },
+    "Fetch YouTube RSS": {
+      "main": [[{ "node": "Parse RSS", "type": "main", "index": 0 }]]
+    },
+    "Parse RSS": {
+      "main": [[{ "node": "Already Processed?", "type": "main", "index": 0 }]]
+    },
+    "Already Processed?": {
+      "main": [[{ "node": "If New Video", "type": "main", "index": 0 }]]
+    },
+    "If New Video": {
+      "main": [
+        [{ "node": "Fetch Transcript", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Fetch Transcript": {
+      "main": [[{ "node": "Claude: Analyze Video", "type": "main", "index": 0 }]]
+    },
+    "Claude: Analyze Video": {
+      "main": [[{ "node": "Bundle Context", "type": "main", "index": 0 }]]
+    },
+    "Bundle Context": {
+      "main": [
+        [
+          { "node": "Claude: Blog Post", "type": "main", "index": 0 },
+          { "node": "Claude: X Thread", "type": "main", "index": 0 },
+          { "node": "Claude: LinkedIn", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Claude: Blog Post": {
+      "main": [[{ "node": "Build 3 Notion Rows", "type": "main", "index": 0 }]]
+    },
+    "Claude: X Thread": {
+      "main": [[{ "node": "Build 3 Notion Rows", "type": "main", "index": 0 }]]
+    },
+    "Claude: LinkedIn": {
+      "main": [[{ "node": "Build 3 Notion Rows", "type": "main", "index": 0 }]]
+    },
+    "Build 3 Notion Rows": {
+      "main": [[{ "node": "Notion: Create Draft", "type": "main", "index": 0 }]]
+    },
+    "Notion: Create Draft": {
+      "main": [[{ "node": "Collect All 3", "type": "main", "index": 0 }]]
+    },
+    "Collect All 3": {
+      "main": [[{ "node": "Build Slack Message", "type": "main", "index": 0 }]]
+    },
+    "Build Slack Message": {
+      "main": [[{ "node": "Slack: #automation-log", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "marketing-lab" },
+    { "name": "content-machine" }
+  ],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
